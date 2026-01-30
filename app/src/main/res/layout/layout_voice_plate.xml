@@ -8,80 +8,87 @@
     <androidx.cardview.widget.CardView
         android:id="@+id/plate_container"
         android:layout_width="match_parent"
-        android:layout_height="300dp"
+        android:layout_height="400dp"
         app:cardBackgroundColor="#212121"
         app:cardCornerRadius="24dp"
         app:cardElevation="12dp"
         app:layout_constraintBottom_toBottomOf="parent">
 
-        <ScrollView
-            android:id="@+id/scroll_view"
+        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="match_parent"
-            android:fillViewport="true"
-            android:padding="16dp">
+            android:orientation="vertical">
 
+            <!-- Chat History Area -->
+            <ScrollView
+                android:id="@+id/scroll_view"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1"
+                android:fillViewport="true"
+                android:padding="16dp">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:id="@+id/sentry_text"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:fontFamily="monospace"
+                        android:text="Sentry: Ready."
+                        android:textColor="#FFFFFF"
+                        android:textSize="14sp" />
+                    
+                </LinearLayout>
+            </ScrollView>
+            
+            <!-- Bottom Controls -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:orientation="vertical">
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:padding="8dp"
+                android:background="#2E2E2E">
 
-                <TextView
-                    android:id="@+id/sentry_text"
-                    android:layout_width="match_parent"
+                <EditText
+                    android:id="@+id/input_text"
+                    android:layout_width="0dp"
                     android:layout_height="wrap_content"
-                    android:fontFamily="monospace"
-                    android:text="Sentry: Ready."
+                    android:layout_weight="1"
+                    android:hint="Ask Sentry..."
                     android:textColor="#FFFFFF"
-                    android:textSize="14sp" />
-                
+                    android:textColorHint="#AAAAAA"
+                    android:backgroundTint="#FFFFFF"
+                    android:inputType="text"
+                    android:imeOptions="actionSend"
+                    android:maxLines="1" />
+
+                <ImageButton
+                    android:id="@+id/btn_send"
+                    android:layout_width="48dp"
+                    android:layout_height="48dp"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:src="@android:drawable/ic_menu_send"
+                    app:tint="#00E5FF"
+                    android:contentDescription="Send"
+                    android:scaleType="centerInside" />
+
+                <ImageButton
+                    android:id="@+id/btn_mic"
+                    android:layout_width="48dp"
+                    android:layout_height="48dp"
+                    android:layout_marginStart="8dp"
+                    android:background="@android:drawable/btn_default_small"
+                    android:backgroundTint="#00E5FF"
+                    android:src="@android:drawable/ic_btn_speak_now"
+                    android:contentDescription="Listen"
+                    android:scaleType="center" />
             </LinearLayout>
-        </ScrollView>
-        
-        <!-- Bottom Controls -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:gravity="center_vertical"
-            android:padding="8dp"
-            android:background="#212121"
-            android:layout_gravity="bottom">
 
-            <EditText
-                android:id="@+id/input_text"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:hint="Ask Sentry..."
-                android:textColor="#FFFFFF"
-                android:textColorHint="#AAAAAA"
-                android:backgroundTint="#FFFFFF"
-                android:inputType="text"
-                android:imeOptions="actionSend"
-                android:maxLines="1" />
-
-            <ImageButton
-                android:id="@+id/btn_send"
-                android:layout_width="48dp"
-                android:layout_height="48dp"
-                android:background="?attr/selectableItemBackgroundBorderless"
-                android:src="@android:drawable/ic_menu_send"
-                app:tint="#00E5FF"
-                android:contentDescription="Send"
-                android:scaleType="centerInside" />
-
-            <ImageButton
-                android:id="@+id/btn_mic"
-                android:layout_width="48dp"
-                android:layout_height="48dp"
-                android:layout_marginStart="8dp"
-                android:background="@android:drawable/btn_default_small"
-                android:backgroundTint="#00E5FF"
-                android:src="@android:drawable/ic_btn_speak_now"
-                android:contentDescription="Listen"
-                android:scaleType="center" />
         </LinearLayout>
-
     </androidx.cardview.widget.CardView>
 </androidx.constraintlayout.widget.ConstraintLayout>

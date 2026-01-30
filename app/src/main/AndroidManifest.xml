@@ -26,6 +26,16 @@
             android:label="Sentry"
             android:permission="android.permission.BIND_VOICE_INTERACTION"
             android:exported="true">
+            <!-- WARNING: Service hosting UI but resizing usually applies to Activities. 
+                 However, VoiceInteractionSession window behavior is controlled here or in the session config.
+                 Since standard attributes might not work on Service tag, we rely on the Session window params.
+                 BUT, let's try the PermissionsActivity as a proxy to ensure the app respects it generally 
+                 or check if we can apply it to the session window in code. 
+                 Actually, windowSoftInputMode in Manifest works for Activities. 
+                 For VoiceInteractionSession, we might need code in onCreate/onShow. 
+                 Let's add it to the Application tag as a global default attempt or check if there's a specific activity hosting this.
+                 Wait, VoiceInteractionSession is a Window. We should set it in SentrySession.kt code.
+                 Let's do that instead of Manifest for the Service. -->
             <meta-data
                 android:name="android.voice_interaction"
                 android:resource="@xml/sentry_service" />

@@ -75,6 +75,14 @@ object SentryBrain {
         }
     }
 
+    // Session Memory
+    private val history = java.util.Collections.synchronizedList(mutableListOf<String>())
+
+    fun clearSession() {
+        history.clear()
+        Log.i(TAG, "Session Memory Cleared.")
+    }
+
     suspend fun processUserRequest(userText: String): SentryIntent = withContext(Dispatchers.IO) {
         if (USE_MOCK_BRAIN || llmInference == null) {
              return@withContext IntentParser.parse("""{"action": "UNKNOWN", "reason": "Mock Mode"}""")
@@ -82,8 +90,15 @@ object SentryBrain {
 
         Log.d(TAG, "Processing Request: $userText")
         
-        // Use a stricter separator
-        val prompt = "$SYSTEM_PROMPT\n\nUser: $userText\nModel:"
+        // Build Prompt with History
+        // IMPORTANT: Use specific tokens to distinguish roles clearly for the model
+        val historyContext = synchronized(history) {
+            if (history.isEmpty()) "" else "\n" + history.joinToString("\n")
+        }
+        
+        // Construct prompt with clear turn indicators
+        // Format: System Instructions -> History -> Current Turn
+        val prompt = "$SYSTEM_PROMPT\n$historyContext\nUser: $userText\nModel:"
         
         try {
             val fullResponse = llmInference?.generateResponse(prompt) ?: ""
@@ -92,8 +107,10 @@ object SentryBrain {
             // Robust Cleaner
             var cleanResponse = fullResponse.trim()
             
-            // 1. Strip the prompt echo if the model repeats it (common in some runtimes)
-            // If the response starts with the System Prompt or User tags, strip them.
+            // 1. Unescape literal newlines (Common issue with some tokenizers)
+            cleanResponse = cleanResponse.replace("\\n", "\n")
+            
+            // 2. Strip the prompt echo if the model repeats it
             if (cleanResponse.startsWith("User:")) {
                  val modelIndex = cleanResponse.indexOf("Model:")
                  if (modelIndex != -1) {
@@ -101,14 +118,30 @@ object SentryBrain {
                  }
             }
             
-            // 2. Remove any subsequent "User:" turns (hallucinations of future conversation)
+            // 3. Remove prefixes like "Sentry:" or "Model:"
+            if (cleanResponse.startsWith("Sentry:", ignoreCase = true)) {
+                cleanResponse = cleanResponse.substring(7).trim()
+            }
+            if (cleanResponse.startsWith("Model:", ignoreCase = true)) {
+                cleanResponse = cleanResponse.substring(6).trim()
+            }
+            
+            // 4. Remove any subsequent "User:" turns
             if (cleanResponse.contains("User:")) {
                 cleanResponse = cleanResponse.substringBefore("User:").trim()
             }
             
-            // 3. Fallback: Sometimes it just outputs the answer.
-            
             Log.d(TAG, "Truncated Output: $cleanResponse")
+            
+            // Update History (Limit to last 10 turns to avoid context overflow)
+            synchronized(history) {
+                history.add("User: $userText")
+                history.add("Model: $cleanResponse")
+                if (history.size > 20) {
+                    history.removeAt(0)
+                    history.removeAt(0)
+                }
+            }
             
             return@withContext IntentParser.parse(cleanResponse)
         } catch (e: Exception) {

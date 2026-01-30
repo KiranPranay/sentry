@@ -97,12 +97,16 @@ class SentrySession(context: Context) : VoiceInteractionSession(context) {
     override fun onShow(args: Bundle?, showFlags: Int) {
         super.onShow(args, showFlags)
         Log.d("SentrySession", "Session Shown.")
+        // Start fresh session by clearing logic memory AND UI text
+        com.sentry.logic.SentryBrain.clearSession()
+        statusView?.text = "" 
         addMessage("--- Ready ---")
-        // startListening() // Disabled auto-listen to prevent loops. Tap Mic to speak.
     }
 
     override fun onHide() {
         super.onHide()
+        // Clear session on exit
+        com.sentry.logic.SentryBrain.clearSession()
         stopListening()
     }
     
@@ -141,7 +145,10 @@ class SentrySession(context: Context) : VoiceInteractionSession(context) {
     fun addMessage(text: String) {
         statusView?.post {
             statusView?.append("\n$text")
-            scrollView?.fullScroll(android.view.View.FOCUS_DOWN)
+            // Auto-scroll to bottom
+            scrollView?.post {
+                scrollView?.fullScroll(android.view.View.FOCUS_DOWN)
+            }
         }
     }
 
