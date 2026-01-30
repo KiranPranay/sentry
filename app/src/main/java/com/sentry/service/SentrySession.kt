@@ -8,6 +8,8 @@ import android.service.voice.VoiceInteractionSession
 import android.speech.RecognitionListener
 import android.speech.SpeechRecognizer
 import android.util.Log
+import android.view.LayoutInflater
+import android.widget.LinearLayout
 import android.widget.TextView
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -16,41 +18,39 @@ import kotlinx.coroutines.launch
 class SentrySession(context: Context) : VoiceInteractionSession(context) {
 
     private var recognizer: SpeechRecognizer? = null
-    private var statusView: TextView? = null
+    // New UI Components
+    private var chatContainer: LinearLayout? = null
     private var scrollView: android.widget.ScrollView? = null
-    private var micButton: android.widget.ImageButton? = null
-    private var inputText: android.widget.EditText? = null
-    private var sendButton: android.widget.ImageButton? = null
+    private var micButton: com.google.android.material.floatingactionbutton.FloatingActionButton? = null
+    private var inputText: com.google.android.material.textfield.TextInputEditText? = null
+    private var loadingIndicator: com.google.android.material.progressindicator.LinearProgressIndicator? = null
+    
     private var isListening = false
 
     override fun onCreate() {
         super.onCreate()
-        val view = layoutInflater.inflate(com.sentry.R.layout.layout_voice_plate, null)
+        // Ensure Theme is applied using a Wrapper
+        val themeContext = android.view.ContextThemeWrapper(context, com.sentry.R.style.Theme_Sentry)
+        val inflater = android.view.LayoutInflater.from(themeContext)
+        val view = inflater.inflate(com.sentry.R.layout.layout_voice_plate, null)
         setContentView(view)
-        statusView = view.findViewById(com.sentry.R.id.sentry_text)
+        
+        chatContainer = view.findViewById(com.sentry.R.id.chat_container)
         scrollView = view.findViewById(com.sentry.R.id.scroll_view)
         micButton = view.findViewById(com.sentry.R.id.btn_mic)
         inputText = view.findViewById(com.sentry.R.id.input_text)
-        sendButton = view.findViewById(com.sentry.R.id.btn_send)
+        loadingIndicator = view.findViewById(com.sentry.R.id.loading_indicator)
 
-        sendButton?.setOnClickListener {
-            val text = inputText?.text?.toString() ?: ""
-            if (text.isNotBlank()) {
-                inputText?.setText("")
-                addMessage("User (Text): $text")
-                // Use IO scope or Main scope properly. 
-                // Using Main scope like onResults does:
-                kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
-                    val intent = com.sentry.logic.SentryBrain.processUserRequest(text)
-                    com.sentry.logic.SkillsRouter.route(this@SentrySession, intent)
-                }
-            }
-        }
-        
-        // Handle "Enter" on keyboard
+        // Handle "Enter" on keyboard (Send)
         inputText?.setOnEditorActionListener { v, actionId, event ->
             if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_SEND) {
-                sendButton?.performClick()
+                // Send Logic
+                val text = inputText?.text?.toString() ?: ""
+                if (text.isNotBlank()) {
+                    inputText?.setText("")
+                    addBubble(text, isUser = true)
+                    processRequest(text)
+                }
                 true
             } else {
                 false
@@ -59,7 +59,7 @@ class SentrySession(context: Context) : VoiceInteractionSession(context) {
         
         micButton?.setOnClickListener {
             if (com.sentry.logic.FeedbackManager.isSpeaking) {
-                addMessage("Wait for Sentry to finish speaking.")
+                addBubble("Wait for Sentry to finish speaking.", isUser = false)
                 return@setOnClickListener
             }
             if (isListening) {
@@ -73,8 +73,12 @@ class SentrySession(context: Context) : VoiceInteractionSession(context) {
         com.sentry.logic.FeedbackManager.setListener { speaking ->
              micButton?.post {
                  micButton?.isEnabled = !speaking
-                 val color = if (speaking) android.graphics.Color.GRAY else (if (isListening) android.graphics.Color.RED else 0xFF00E5FF.toInt())
-                 micButton?.backgroundTintList = android.content.res.ColorStateList.valueOf(color)
+                 if (speaking) {
+                     micButton?.setImageResource(android.R.drawable.ic_lock_silent_mode_off)
+                 } else {
+                     micButton?.setImageResource(android.R.drawable.ic_btn_speak_now)
+                 }
+                 
                  if (speaking && isListening) {
                      stopListening() // Kill mic if TTS steals focus
                  }
@@ -84,6 +88,42 @@ class SentrySession(context: Context) : VoiceInteractionSession(context) {
         initRecognizer()
     }
     
+    private fun processRequest(text: String) {
+        showLoading(true)
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
+            val intent = com.sentry.logic.SentryBrain.processUserRequest(text)
+            showLoading(false)
+            com.sentry.logic.SkillsRouter.route(this@SentrySession, intent)
+        }
+    }
+    
+    private fun showLoading(isLoading: Boolean) {
+        loadingIndicator?.post {
+            loadingIndicator?.visibility = if (isLoading) android.view.View.VISIBLE else android.view.View.INVISIBLE
+        }
+    }
+    
+    // Bubble Injection Logic
+    fun addMessage(text: String) {
+        // Compatibility function for Router
+        addBubble(text, isUser = false)
+    }
+
+    private fun addBubble(text: String, isUser: Boolean) {
+        chatContainer?.post {
+            val layoutId = if (isUser) com.sentry.R.layout.item_chat_user else com.sentry.R.layout.item_chat_bot
+            val bubbleView = LayoutInflater.from(context).inflate(layoutId, chatContainer, false)
+            val textView = bubbleView.findViewById<TextView>(com.sentry.R.id.text_message)
+            textView.text = text
+            chatContainer?.addView(bubbleView)
+            
+            // Auto-scroll
+            scrollView?.post {
+                scrollView?.fullScroll(android.view.View.FOCUS_DOWN)
+            }
+        }
+    }
+
     private fun initRecognizer() {
         if (recognizer != null) {
             recognizer?.destroy()
@@ -97,32 +137,33 @@ class SentrySession(context: Context) : VoiceInteractionSession(context) {
     override fun onShow(args: Bundle?, showFlags: Int) {
         super.onShow(args, showFlags)
         Log.d("SentrySession", "Session Shown.")
-        // Start fresh session by clearing logic memory AND UI text
+        // Start fresh session logic
         com.sentry.logic.SentryBrain.clearSession()
-        statusView?.text = "" 
-        addMessage("--- Ready ---")
+        
+        // Clear Chat UI
+        chatContainer?.removeAllViews()
+        addBubble("Ready.", isUser = false)
     }
 
     override fun onHide() {
         super.onHide()
-        // Clear session on exit
         com.sentry.logic.SentryBrain.clearSession()
         stopListening()
     }
     
     private fun startListening() {
-        if (isListening) return // Already running
-        
+        if (isListening) return 
         try {
-            // Reset to ensure clean state
             recognizer?.cancel()
             val intent = Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
             recognizer?.startListening(intent)
             isListening = true
-            micButton?.backgroundTintList = android.content.res.ColorStateList.valueOf(android.graphics.Color.RED)
-            addMessage("Listening...")
+            
+            // UI Update: Pulse Mic
+            micButton?.backgroundTintList = android.content.res.ColorStateList.valueOf(0xFFB00020.toInt()) // Red
+            showLoading(true) // Show indicator to mean "Listening/Processing" state
         } catch (e: Exception) {
-            addMessage("Error starting: ${e.message}")
+            addBubble("Error starting: ${e.message}", isUser = false)
             isListening = false
         }
     }
@@ -131,76 +172,44 @@ class SentrySession(context: Context) : VoiceInteractionSession(context) {
         try {
             recognizer?.stopListening()
             isListening = false
-            micButton?.backgroundTintList = android.content.res.ColorStateList.valueOf(0xFF00E5FF.toInt())
+             // Reset UI
+            micButton?.backgroundTintList = null // Default
+            showLoading(false)
         } catch (e: Exception) {
             // Ignored
         }
     }
 
-    private fun updateStatus(text: String) {
-        // Alias for addMessage used by legacy calls
-        addMessage(text)
-    }
-
-    fun addMessage(text: String) {
-        statusView?.post {
-            statusView?.append("\n$text")
-            // Auto-scroll to bottom
-            scrollView?.post {
-                scrollView?.fullScroll(android.view.View.FOCUS_DOWN)
-            }
-        }
-    }
-
     inner class SentryRecognitionListener : RecognitionListener {
-        override fun onReadyForSpeech(params: Bundle?) { Log.d("SentrySession", "onReadyForSpeech") }
-        override fun onBeginningOfSpeech() { 
-            Log.d("SentrySession", "onBeginningOfSpeech") 
-        }
+        override fun onReadyForSpeech(params: Bundle?) {}
+        override fun onBeginningOfSpeech() {}
         override fun onRmsChanged(rmsdB: Float) {}
         override fun onBufferReceived(buffer: ByteArray?) {}
         override fun onEndOfSpeech() { 
-            Log.d("SentrySession", "onEndOfSpeech") 
             isListening = false
-            micButton?.post {
-                 micButton?.backgroundTintList = android.content.res.ColorStateList.valueOf(0xFF00E5FF.toInt())
-            }
+            micButton?.backgroundTintList = null
+            showLoading(true) // Keep loading while we process results
         }
         override fun onError(error: Int) {
-            Log.e("SentrySession", "Speech Error: $error")
-            addMessage("Speech Error ($error)")
             isListening = false
-            micButton?.post {
-                 micButton?.backgroundTintList = android.content.res.ColorStateList.valueOf(0xFF00E5FF.toInt())
-            }
-            
-            // Re-init on critical errors, but avoid loops
-            if (!isListening && (error == SpeechRecognizer.ERROR_CLIENT || error == SpeechRecognizer.ERROR_SERVER)) {
-                 // Only restart if we didn't intentionally stop?
-                 // Actually, Error 5 often happens if we call start while it's busy.
-                 // A restart is aggressive but might be needed.
-                 // statusView?.post { initRecognizer() } 
-                 // Let's NOT auto-restart on error for now to prevent loops vs crashes.
-                 // User can tap Mic to restart.
-                 addMessage("Tap Mic to retry.")
+            micButton?.backgroundTintList = null
+            showLoading(false)
+            if (error != SpeechRecognizer.ERROR_NO_MATCH && error != SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
+                 addBubble("Speech Error ($error)", isUser = false)
             }
         }
         override fun onResults(results: Bundle?) {
-            Log.d("SentrySession", "onResults received")
             isListening = false
-            micButton?.post {
-                 micButton?.backgroundTintList = android.content.res.ColorStateList.valueOf(0xFF00E5FF.toInt())
-            }
+            micButton?.backgroundTintList = null
             
             val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
             val text = matches?.firstOrNull() ?: ""
 
             if (text.isNotBlank()) {
-                addMessage("User: $text")
-                kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
-                    val intent = com.sentry.logic.SentryBrain.processUserRequest(text)
-                    com.sentry.logic.SkillsRouter.route(this@SentrySession, intent)
-                }
+                addBubble(text, isUser = true)
+                processRequest(text)
+            } else {
+                showLoading(false)
             }
         }
         override fun onPartialResults(partialResults: Bundle?) {}
