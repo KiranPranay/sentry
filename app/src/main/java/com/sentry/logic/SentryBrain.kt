@@ -9,8 +9,8 @@ import java.io.File
 
 object SentryBrain {
     private const val TAG = "SentryBrain"
-    // Updated to match the specific LiteRT community file
-    private const val MODEL_NAME = "gemma3-270m-it-q8.task"
+    // Updated to match the specific LiteRT community file (1B Model)
+    private const val MODEL_NAME = "Gemma3-1B-IT_multi-prefill-seq_q8_ekv1280.task"
     
     private var llmInference: LlmInference? = null
     
