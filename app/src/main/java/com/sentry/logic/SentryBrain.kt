@@ -29,24 +29,35 @@ You are running locally on an Android device.
 
 ### ACTION SCHEMAS
 - ALARM: {"action": "SET_ALARM", "hour": 24_hr_int, "minute": int}
-- CALL: {"action": "MAKE_CALL", "contactName": "name_string"}
+- CALL (Name): {"action": "MAKE_CALL", "contactName": "name_string"}
+- CALL (Selection): {"action": "MAKE_CALL", "selectionIndex": int}
+
+### DISAMBIGUATION LOGIC
+- **Context Dependent**: You can ONLY use `selectionIndex` if the *immediately preceding* System message contained a numbered list (e.g. "1. A, 2. B").
+- **NO LIST = NO INDEX**: If the previous message was NOT a list of contacts, do NOT output `selectionIndex`. Just answer the user's question in TEXT.
 
 ### STRICT RULES
-- DO NOT output JSON for general knowledge. Answer these as a human would.
-- Never say "Unknown action." If you don't recognize a command, just respond conversationally.
-- For alarms, if the user doesn't specify AM/PM, use context or 24-hour time.
+- **General Questions**: "Who...", "What...", "Where..." -> MUST be TEXT context. NEVER `MAKE_CALL`.
+- **Selection**: Only output JSON if you are responding to a explicit choice from a list.
 
-### FEW-SHOT EXAMPLES (Anchor your behavior here)
+
+### FEW-SHOT EXAMPLES
 User: Who is Obama?
-Sentry: Barack Obama was the 44th President of the United States. He served from 2009 to 2017.
+Sentry: Barack Obama was the 44th President of the United States. 
 User: Set alarm for 7 am.
 Sentry: {"action": "SET_ALARM", "hour": 7, "minute": 0}
 User: Call Pranay.
 Sentry: {"action": "MAKE_CALL", "contactName": "Pranay"}
-User: What is the weather?
-Sentry: I don't have real-time weather data right now, but it looks like a clear day in your area!
+User: Call Kumar.
+Sentry: I found multiple contacts: 1. Kumar A, 2. Kumar B. Who do you want to call?
+User: The first one.
+Sentry: {"action": "MAKE_CALL", "selectionIndex": 1}
+User: Who are you?
+Sentry: I am Sentry, your AI assistant.
+User: what is this?
+Sentry: This is a conversation.
 
-When, an action was called. Just, give json output. No text at all.
+Output JSON ONLY for actions. Otherwise, plain text.
 """
 
     // Flag to bypass native crash until we find a compatible model version
@@ -89,7 +100,7 @@ When, an action was called. Just, give json output. No text at all.
 
             val options = LlmInference.LlmInferenceOptions.builder()
                 .setModelPath(modelFile.absolutePath)
-                .setMaxTokens(512)
+                .setMaxTokens(1024)
                 .build()
 
             llmInference = LlmInference.createFromOptions(context, options)
@@ -158,15 +169,9 @@ When, an action was called. Just, give json output. No text at all.
             
             Log.d(TAG, "Truncated Output: $cleanResponse")
             
-            // Update History (Limit to last 10 turns to avoid context overflow)
-            synchronized(history) {
-                history.add("User: $userText")
-                history.add("Model: $cleanResponse")
-                if (history.size > 20) {
-                    history.removeAt(0)
-                    history.removeAt(0)
-                }
-            }
+            // Update History
+            addToHistory("User: $userText")
+            addToHistory("Model: $cleanResponse")
             
             return@withContext IntentParser.parse(cleanResponse)
         } catch (e: Exception) {
@@ -174,4 +179,24 @@ When, an action was called. Just, give json output. No text at all.
             return@withContext ErrorIntent("Inference Failed: ${e.message}")
         }
     }
+
+    /**
+     * Allows components (like SkillsRouter) to inject context into the Brain's memory.
+     * e.g. "System: Found multiple contacts: Mom, Dhanush Mom"
+     */
+    fun addToHistory(text: String) {
+        synchronized(history) {
+            history.add(text)
+            
+            // Safety: Preventing Context Overflow (SIGSEGV)
+            // Limit by approximate token count (chars). 
+            // 1024 tokens ~ 4000 chars. We reserve 1000 for system prompt + new input.
+            // So history should strictly be under 2500 chars.
+            while (history.joinToString("\n").length > 2500 && history.isNotEmpty()) {
+                // Remove oldest interaction
+                 history.removeAt(0)
+            }
+        }
+    }
+
 }

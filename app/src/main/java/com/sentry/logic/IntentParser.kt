@@ -13,7 +13,7 @@ sealed class SentryIntent(val action: SentryAction)
 
 // Specific Intents
 data class AlarmIntent(val hour: Int, val minute: Int) : SentryIntent(SentryAction.SET_ALARM)
-data class CallIntent(val contactName: String) : SentryIntent(SentryAction.MAKE_CALL)
+data class CallIntent(val contactName: String?, val selectionIndex: Int? = null) : SentryIntent(SentryAction.MAKE_CALL)
 data class MusicIntent(val query: String) : SentryIntent(SentryAction.PLAY_MUSIC)
 data class ChatIntent(val text: String) : SentryIntent(SentryAction.CHAT)
 data class UnknownIntent(val reason: String) : SentryIntent(SentryAction.UNKNOWN)
@@ -25,6 +25,7 @@ data class RawIntent(
     val hour: Int?,
     val minute: Int?,
     val contactName: String?,
+    val selectionIndex: Int?,
     val musicQuery: String?,
     val text: String?, // For Chat
     val reason: String?
@@ -62,10 +63,12 @@ object IntentParser {
                     }
                 }
                 "MAKE_CALL" -> {
-                    if (!raw.contactName.isNullOrBlank()) {
-                        CallIntent(raw.contactName)
+                    if (raw.selectionIndex != null) {
+                         CallIntent(null, raw.selectionIndex)
+                    } else if (!raw.contactName.isNullOrBlank()) {
+                        CallIntent(raw.contactName, null)
                     } else {
-                        ErrorIntent("Missing contact name")
+                        ErrorIntent("Missing contact name or selection index")
                     }
                 }
                 "PLAY_MUSIC" -> {
