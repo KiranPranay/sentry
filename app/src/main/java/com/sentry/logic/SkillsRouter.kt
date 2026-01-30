@@ -52,20 +52,52 @@ object SkillsRouter {
     }
 
     private fun makeCall(session: android.service.voice.VoiceInteractionSession, contactName: String) {
-        if (androidx.core.content.ContextCompat.checkSelfPermission(session.context, android.Manifest.permission.CALL_PHONE) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
-            val i = Intent(Intent.ACTION_CALL).apply {
-                data = Uri.parse("tel:1234567890")
+        val context = session.context
+        // Check READ_CONTACTS and CALL_PHONE permissions
+        if (androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.CALL_PHONE) != android.content.pm.PackageManager.PERMISSION_GRANTED ||
+            androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.READ_CONTACTS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            
+            prepareForSpeech(session, "I need permission to access contacts and make calls. Tap to grant.")
+            val permIntent = Intent(context, com.sentry.ui.PermissionsActivity::class.java).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-            safeStartActivity(session, i, "Calling $contactName")
-        } else {
-            prepareForSpeech(session, "I need permission to make calls. Tap to grant.")
-            // Launch our Permission Request UI
-            val permIntent = Intent(session.context, com.sentry.ui.PermissionsActivity::class.java).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            session.context.startActivity(permIntent)
+            context.startActivity(permIntent)
+            return
         }
+
+        // Lookup Phone Number
+        val number = resolveContactNumber(context, contactName)
+        if (number.isNullOrBlank()) {
+            prepareForSpeech(session, "I couldn't find a contact named $contactName.")
+            return
+        }
+
+        // Make the Call
+        val i = Intent(Intent.ACTION_CALL).apply {
+            data = Uri.parse("tel:$number")
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        safeStartActivity(session, i, "Calling $contactName")
+    }
+
+    private fun resolveContactNumber(context: Context, name: String): String? {
+        var phoneNumber: String? = null
+        val cursor = context.contentResolver.query(
+            android.provider.ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+            arrayOf(android.provider.ContactsContract.CommonDataKinds.Phone.NUMBER),
+            "${android.provider.ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} LIKE ?",
+            arrayOf("%$name%"),
+            null
+        )
+        
+        cursor?.use {
+            if (it.moveToFirst()) {
+                phoneNumber = it.getString(it.getColumnIndexOrThrow(android.provider.ContactsContract.CommonDataKinds.Phone.NUMBER))
+            }
+        }
+        
+        // Basic cleanup (remove spaces, etc. if needed, but Intent.ACTION_CALL handles most)
+        return phoneNumber
     }
 
     private fun playMusic(session: android.service.voice.VoiceInteractionSession, query: String) {
