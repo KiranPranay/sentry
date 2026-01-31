@@ -78,7 +78,7 @@ object IntentParser {
                         ErrorIntent("Missing music query")
                     }
                 }
-                "CHAT" -> {
+                "CHAT", "TEXT" -> {
                     if (!raw.text.isNullOrBlank()) {
                         ChatIntent(raw.text)
                     } else {

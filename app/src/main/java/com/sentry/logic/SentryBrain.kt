@@ -43,19 +43,19 @@ You are running locally on an Android device.
 
 ### FEW-SHOT EXAMPLES
 User: Who is Obama?
-Sentry: Barack Obama was the 44th President of the United States. 
+Model: Barack Obama was the 44th President of the United States. 
 User: Set alarm for 7 am.
-Sentry: {"action": "SET_ALARM", "hour": 7, "minute": 0}
+Model: {"action": "SET_ALARM", "hour": 7, "minute": 0}
 User: Call Pranay.
-Sentry: {"action": "MAKE_CALL", "contactName": "Pranay"}
+Model: {"action": "MAKE_CALL", "contactName": "Pranay"}
 User: Call Kumar.
-Sentry: I found multiple contacts: 1. Kumar A, 2. Kumar B. Who do you want to call?
+Model: I found multiple contacts: 1. Kumar A, 2. Kumar B. Who do you want to call?
 User: The first one.
-Sentry: {"action": "MAKE_CALL", "selectionIndex": 1}
+Model: {"action": "MAKE_CALL", "selectionIndex": 1}
 User: Who are you?
-Sentry: I am Sentry, your AI assistant.
+Model: I am Sentry, your AI assistant.
 User: what is this?
-Sentry: This is a conversation.
+Model: This is a conversation.
 
 Output JSON ONLY for actions. Otherwise, plain text.
 """
@@ -154,12 +154,12 @@ Output JSON ONLY for actions. Otherwise, plain text.
                  }
             }
             
-            // 3. Remove prefixes like "Sentry:" or "Model:"
-            if (cleanResponse.startsWith("Sentry:", ignoreCase = true)) {
-                cleanResponse = cleanResponse.substring(7).trim()
-            }
-            if (cleanResponse.startsWith("Model:", ignoreCase = true)) {
-                cleanResponse = cleanResponse.substring(6).trim()
+            // 3. Remove prefixes like "Sentry:", "Model:", or "Sentry :"
+            val prefixRegex = "^(?i)(Sentry|Model|System)\\s*:\\s*".toRegex()
+            cleanResponse = cleanResponse.replaceFirst(prefixRegex, "").trim()
+            // Loop to handle stacked prefixes like "Model: Sentry: ..."
+            while (prefixRegex.containsMatchIn(cleanResponse)) {
+                cleanResponse = cleanResponse.replaceFirst(prefixRegex, "").trim()
             }
             
             // 4. Remove any subsequent "User:" turns

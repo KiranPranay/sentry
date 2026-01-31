@@ -185,7 +185,7 @@ object SkillsRouter {
     private fun prepareForSpeech(session: android.service.voice.VoiceInteractionSession, text: String) {
         if (session is com.sentry.service.SentrySession) {
              session.stopListening() // CRITICAL: Stop mic BEFORE TTS starts to avoid echo
-             session.addMessage("Sentry: $text")
+             session.addMessage("$text")
              
              // FEEDBACK LOOP: Tell the Brain what we just said, so it has context for the NEXT turn.
              // e.g. If we said "Who do you want to call?", the Brain needs to know that.
