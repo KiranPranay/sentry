@@ -121,6 +121,7 @@ private fun HomeScreen(
         }
     }
     val learnedCount = remember(refresh) { container.phrases.all().size }
+    val enrolledVoice = remember(refresh) { container.voiceProfile.sampleCount }
     val taraInstalled = remember(refresh) { TaraCore.isInstalled(context) }
     val isDefaultAssistant = remember(refresh) { context.isDefaultAssistant() }
     val canScheduleAlarms = remember(refresh) { context.canScheduleExactAlarms() }
@@ -304,6 +305,32 @@ private fun HomeScreen(
                     "If Sentry always mishears something — \"call maa\" as \"karma\" — " +
                         "say it a few times and it will learn what you mean." +
                         (if (learnedCount > 0) "  ($learnedCount learned)" else ""),
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+
+        Spacer(Modifier.height(10.dp))
+
+        Surface(
+            shape = RoundedCornerShape(16.dp),
+            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { context.startActivity(Intent(context, EnrollActivity::class.java)) },
+        ) {
+            Column(Modifier.padding(16.dp)) {
+                Text("Teach Sentry your voice", fontWeight = FontWeight.Medium)
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    if (enrolledVoice > 0) {
+                        "Learned from $enrolledVoice recordings. Sentry can tell your " +
+                            "voice from someone else's."
+                    } else {
+                        "Read five sentences so Sentry can tell your voice from " +
+                            "someone else's — and optionally ignore everyone else."
+                    },
                     style = MaterialTheme.typography.bodyLarge,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

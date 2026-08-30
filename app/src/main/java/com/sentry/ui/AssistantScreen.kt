@@ -65,6 +65,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
@@ -75,7 +77,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.sentry.core.Agent
+import kotlinx.coroutines.delay
 import com.sentry.core.Chip
 import com.sentry.core.ChipIcon
 import com.sentry.core.Party
@@ -95,10 +97,27 @@ fun AssistantScreen(
     onDismiss: () -> Unit,
 ) {
     val transcript by viewModel.transcript.collectAsStateWithLifecycle()
-    val status by viewModel.status.collectAsStateWithLifecycle()
+    val state by viewModel.uiState.collectAsStateWithLifecycle()
     val partial by viewModel.partial.collectAsStateWithLifecycle()
     val amplitude by viewModel.amplitude.collectAsStateWithLifecycle()
     val speechReady by viewModel.speechReady.collectAsStateWithLifecycle()
+    val expectsAnswer by viewModel.expectsAnswer.collectAsStateWithLifecycle()
+
+    // A state that has quietly been true for a moment reads as nothing having
+    // happened. The handover from speaking to listening is the exact instant the
+    // user needs to notice, so it gets a one-shot cue rather than a steady one.
+    val haptics = LocalHapticFeedback.current
+    var justOpened by remember { mutableStateOf(false) }
+    var wasSpeaking by remember { mutableStateOf(false) }
+    LaunchedEffect(state) {
+        if (state == AssistantViewModel.UiState.LISTENING && wasSpeaking) {
+            justOpened = true
+            runCatching { haptics.performHapticFeedback(HapticFeedbackType.LongPress) }
+            delay(1_600)
+            justOpened = false
+        }
+        wasSpeaking = state == AssistantViewModel.UiState.SPEAKING
+    }
 
     val listState = rememberLazyListState()
     LaunchedEffect(transcript.size) {
@@ -108,7 +127,7 @@ fun AssistantScreen(
     // The scrim darkens as the assistant becomes active, so the app underneath
     // recedes without ever fully disappearing.
     val scrimAlpha by animateFloatAsState(
-        targetValue = if (status == Agent.Status.IDLE) 0.92f else 0.97f,
+        targetValue = if (state == AssistantViewModel.UiState.IDLE) 0.92f else 0.97f,
         animationSpec = tween(400),
         label = "scrim",
     )
@@ -172,17 +191,20 @@ fun AssistantScreen(
             }
 
             Orb(
-                status = status,
+                state = state,
                 amplitude = amplitude,
+                justOpened = justOpened,
                 modifier = Modifier
                     .padding(vertical = 18.dp)
                     .size(132.dp),
             )
 
             StatusLine(
-                status = status,
+                state = state,
                 partial = partial,
                 speechReady = speechReady,
+                expectsAnswer = expectsAnswer,
+                justOpened = justOpened,
                 modifier = Modifier
                     .fillMaxWidth()
                     .heightIn(min = 56.dp)
@@ -190,7 +212,7 @@ fun AssistantScreen(
             )
 
             InputBar(
-                listening = status == Agent.Status.LISTENING,
+                listening = state == AssistantViewModel.UiState.LISTENING,
                 onMic = viewModel::toggleMic,
                 onSubmit = viewModel::submit,
                 modifier = Modifier
@@ -209,27 +231,39 @@ fun AssistantScreen(
  */
 @Composable
 private fun StatusLine(
-    status: Agent.Status,
+    state: AssistantViewModel.UiState,
     partial: String,
     speechReady: Boolean,
+    expectsAnswer: Boolean,
+    justOpened: Boolean,
     modifier: Modifier = Modifier,
 ) {
+    // Ordered so the line can never claim something untrue. The partial transcript
+    // comes first because it is the only item here that is *evidence* the mic is
+    // open rather than a promise — the user's own words, appearing as they speak.
     val text = when {
         partial.isNotBlank() -> partial
         !speechReady -> "Getting speech ready…"
-        status == Agent.Status.LISTENING -> "Listening"
-        status == Agent.Status.THINKING -> "Thinking"
-        status == Agent.Status.SPEAKING -> ""
+        state == AssistantViewModel.UiState.SPEAKING -> "Say \"Sentry\" to cut in"
+        state == AssistantViewModel.UiState.THINKING -> "Thinking"
+        state == AssistantViewModel.UiState.LISTENING && expectsAnswer -> "Go ahead"
+        // Said once, at the handover, then out of the way. Left up for the whole
+        // turn it would become wallpaper and stop being read at all.
+        state == AssistantViewModel.UiState.LISTENING && justOpened -> "Still listening — just talk"
+        state == AssistantViewModel.UiState.LISTENING -> "Listening"
         else -> "Tap the mic, or say \"Sentry\""
     }
+
+    val emphasis = partial.isNotBlank() ||
+        (state == AssistantViewModel.UiState.LISTENING && (justOpened || expectsAnswer))
 
     Box(modifier, contentAlignment = Alignment.Center) {
         Text(
             text = text,
             style = MaterialTheme.typography.headlineSmall,
-            color = if (partial.isNotBlank()) Color.White else Color.White.copy(alpha = 0.55f),
+            color = if (emphasis) Color.White else Color.White.copy(alpha = 0.55f),
             textAlign = TextAlign.Center,
-            fontWeight = if (partial.isNotBlank()) FontWeight.Normal else FontWeight.Light,
+            fontWeight = if (emphasis) FontWeight.Normal else FontWeight.Light,
         )
     }
 }

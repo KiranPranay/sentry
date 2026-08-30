@@ -5,6 +5,7 @@ import android.content.Context
 import com.sentry.brain.Brains
 import com.sentry.core.Agent
 import com.sentry.data.PhraseBook
+import com.sentry.data.VoiceProfile
 import com.sentry.data.Prefs
 import com.sentry.nlu.FastMatcher
 import com.sentry.nlu.Planner
@@ -44,6 +45,7 @@ class Container(context: Context) {
 
     val prefs = Prefs(appContext)
     val phrases = PhraseBook(appContext)
+    val voiceProfile = VoiceProfile(appContext)
 
     val voice = VoiceEngine(appContext).apply {
         pack = prefs.speechPack

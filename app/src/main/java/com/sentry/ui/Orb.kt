@@ -4,6 +4,7 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.Spring
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
@@ -21,12 +22,13 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.draw.BlurredEdgeTreatment
 import androidx.compose.ui.draw.blur
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import com.sentry.core.Agent
 import kotlin.math.PI
 import kotlin.math.cos
+import kotlin.math.pow
 import kotlin.math.sin
 
 /**
@@ -44,11 +46,23 @@ import kotlin.math.sin
  */
 @Composable
 fun Orb(
-    status: Agent.Status,
+    state: AssistantViewModel.UiState,
     amplitude: Float,
+    justOpened: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
-    val palette = paletteFor(status)
+    // Cross-faded rather than swapped. An instant palette change reads as a cut;
+    // the hand-off from answering to listening is the moment we most want to read
+    // as one continuous thing paying attention.
+    val target = paletteFor(state)
+    val palette = Palette(
+        core = animateColorAsState(target.core, tween(FADE_MS), label = "core").value,
+        first = animateColorAsState(target.first, tween(FADE_MS), label = "first").value,
+        second = animateColorAsState(target.second, tween(FADE_MS), label = "second").value,
+        third = animateColorAsState(target.third, tween(FADE_MS), label = "third").value,
+        fourth = animateColorAsState(target.fourth, tween(FADE_MS), label = "fourth").value,
+        rim = animateColorAsState(target.rim, tween(FADE_MS), label = "rim").value,
+    )
 
     val transition = rememberInfiniteTransition(label = "orb")
 
@@ -90,15 +104,21 @@ fun Orb(
     )
 
     val reactive = remember { Animatable(0f) }
-    LaunchedEffect(amplitude, status) {
-        val target = when (status) {
-            Agent.Status.LISTENING -> amplitude
-            Agent.Status.SPEAKING -> 0.35f + amplitude * 0.2f
-            Agent.Status.THINKING -> 0.25f
-            Agent.Status.IDLE -> 0f
+    LaunchedEffect(amplitude, state) {
+        val energy = when (state) {
+            // Speech lands roughly in 0.12..0.35 on this meter, so feeding raw
+            // amplitude into a 0..1 response used about a fifth of the range and the
+            // orb barely moved. Subtract the floor, rescale, and put a gamma on it so
+            // quiet speech still registers visibly.
+            AssistantViewModel.UiState.LISTENING ->
+                (((amplitude - FLOOR) / SPAN).coerceIn(0f, 1f)).pow(0.6f)
+
+            AssistantViewModel.UiState.SPEAKING -> 0.35f + amplitude * 0.2f
+            AssistantViewModel.UiState.THINKING -> 0.25f
+            AssistantViewModel.UiState.IDLE -> 0f
         }
         reactive.animateTo(
-            targetValue = target,
+            targetValue = energy,
             animationSpec = spring(
                 dampingRatio = 0.55f,
                 stiffness = Spring.StiffnessMediumLow,
@@ -106,11 +126,22 @@ fun Orb(
         )
     }
 
-    val pulse = when (status) {
-        Agent.Status.THINKING -> 0.06f * sin(thinkingPulse)
+    // One bump at the hand-off, kept separate from the amplitude response so the two
+    // compose instead of fighting over the same value.
+    val greeting = remember { Animatable(0f) }
+    LaunchedEffect(justOpened) {
+        if (justOpened) {
+            greeting.snapTo(0f)
+            greeting.animateTo(1f, spring(dampingRatio = 0.45f, stiffness = Spring.StiffnessMediumLow))
+            greeting.animateTo(0f, tween(420))
+        }
+    }
+
+    val pulse = when (state) {
+        AssistantViewModel.UiState.THINKING -> 0.06f * sin(thinkingPulse)
         else -> 0.02f * sin(breath)
     }
-    val scale = 1f + reactive.value * 0.22f + pulse
+    val scale = 1f + reactive.value * 0.20f + pulse + greeting.value * 0.12f
 
     Canvas(
         modifier = modifier
@@ -134,6 +165,19 @@ fun Orb(
         blob(centre, radius, medium + 120f, 0.26f, 0.88f, palette.second, reactive.value)
         blob(centre, radius, fast + 240f, 0.22f, 0.80f, palette.third, reactive.value)
         blob(centre, radius, -medium + 60f, 0.18f, 0.72f, palette.fourth, reactive.value)
+
+        // A single ring, expanding once as the microphone reopens. Deliberately not
+        // a repeating pulse: a ring beating on a timer beside an orb reacting to the
+        // voice makes the orb look less responsive than it actually is.
+        if (greeting.value > 0.01f) {
+            val spread = 0.72f + (1f - greeting.value) * 0.63f
+            drawCircle(
+                color = palette.rim.copy(alpha = 0.5f * greeting.value),
+                radius = radius * spread,
+                center = centre,
+                style = Stroke(width = radius * 0.045f),
+            )
+        }
 
         // A hot core, standing in for the additive blend an offscreen layer would
         // have given us — without the square that came with it.
@@ -210,10 +254,10 @@ private data class Palette(
  * Colour carries the state, so the orb is legible with the screen at arm's length and
  * the text unreadable.
  */
-private fun paletteFor(status: Agent.Status): Palette = when (status) {
+private fun paletteFor(state: AssistantViewModel.UiState): Palette = when (state) {
     // Idle is dimmer than the active states but not by so much that the orb looks
     // switched off — it is the only thing on screen telling you Sentry is there.
-    Agent.Status.IDLE -> Palette(
+    AssistantViewModel.UiState.IDLE -> Palette(
         core = Color(0xFF3A4A80),
         first = Color(0xFF5B7FD4),
         second = Color(0xFF6C5CC0),
@@ -222,7 +266,7 @@ private fun paletteFor(status: Agent.Status): Palette = when (status) {
         rim = Color(0xFFA8C0F5),
     )
 
-    Agent.Status.LISTENING -> Palette(
+    AssistantViewModel.UiState.LISTENING -> Palette(
         core = Color(0xFF1B4C7A),
         first = Color(0xFF23D3F0),
         second = Color(0xFF3B82F6),
@@ -231,7 +275,7 @@ private fun paletteFor(status: Agent.Status): Palette = when (status) {
         rim = Color(0xFF9BE8FF),
     )
 
-    Agent.Status.THINKING -> Palette(
+    AssistantViewModel.UiState.THINKING -> Palette(
         core = Color(0xFF44206B),
         first = Color(0xFF9B5CFF),
         second = Color(0xFFE05CC8),
@@ -240,7 +284,7 @@ private fun paletteFor(status: Agent.Status): Palette = when (status) {
         rim = Color(0xFFE8B4FF),
     )
 
-    Agent.Status.SPEAKING -> Palette(
+    AssistantViewModel.UiState.SPEAKING -> Palette(
         core = Color(0xFF12513F),
         first = Color(0xFF2BE0A8),
         second = Color(0xFF3BC7F6),
@@ -249,6 +293,13 @@ private fun paletteFor(status: Agent.Status): Palette = when (status) {
         rim = Color(0xFFA6FFE0),
     )
 }
+
+/** Amplitude below this is room tone; the span above it is where speech lives. */
+private const val FLOOR = 0.06f
+private const val SPAN = 0.34f
+
+/** Palette cross-fade duration for a state change. */
+private const val FADE_MS = 260
 
 /** [blur] exists only from API 31; below it this is simply nothing. */
 private fun Modifier.blurCompat(radius: Dp): Modifier =

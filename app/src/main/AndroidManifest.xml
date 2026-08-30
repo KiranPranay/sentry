@@ -79,6 +79,14 @@
             </intent-filter>
         </activity>
 
+        <!-- Teaching Sentry your voice, so it can tell you from someone else. -->
+        <activity
+            android:name=".ui.EnrollActivity"
+            android:exported="false"
+            android:label="Teach Sentry your voice"
+            android:parentActivityName=".ui.HomeActivity"
+            android:theme="@style/Theme.Sentry" />
+
         <!-- Teaching Sentry a phrase it keeps mishearing. -->
         <activity
             android:name=".ui.TeachActivity"

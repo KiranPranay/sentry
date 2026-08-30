@@ -14,7 +14,10 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
 /**
@@ -48,6 +51,30 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     val partial = voice.partial
     val amplitude = voice.amplitude
     val speechReady = voice.ready
+    val expectsAnswer = agent.expectsAnswer
+
+    /**
+     * What the screen should say Sentry is doing.
+     *
+     * Combines two things the old code confused for one. [Agent.Status] is what
+     * Sentry is *doing*; [VoiceEngine.capturing] is whether the microphone is
+     * *open*. Speaking wins over listening only because the mic being open during an
+     * answer is for barge-in, and calling that "Listening" would invite the user to
+     * talk over every reply.
+     */
+    val uiState: StateFlow<UiState> = combine(
+        agent.status,
+        voice.capturing,
+    ) { status, micOpen ->
+        when {
+            status == Agent.Status.SPEAKING -> UiState.SPEAKING
+            status == Agent.Status.THINKING -> UiState.THINKING
+            micOpen -> UiState.LISTENING
+            else -> UiState.IDLE
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), UiState.IDLE)
+
+    enum class UiState { IDLE, LISTENING, THINKING, SPEAKING }
 
     private val _finished = MutableStateFlow(false)
 
@@ -64,7 +91,18 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch {
             voice.events.collect { event ->
                 when (event) {
-                    is VoiceEngine.Event.Transcript -> onHeard(event.text)
+                    is VoiceEngine.Event.Transcript -> {
+                        // Speaker check, and only where it can be done honestly: a
+                        // dictated command is long enough to carry a usable
+                        // voiceprint, where the wake word is not. Fails open — see
+                        // VoiceProfile.accepts.
+                        if (container.voiceProfile.accepts(event.voiceprint)) {
+                            onHeard(event.text)
+                        } else {
+                            Log.i(TAG, "ignoring \"${event.text}\": not the enrolled voice")
+                            agent.setListening(false)
+                        }
+                    }
 
                     // Silence is how a conversation ends. Anything else would leave
                     // the microphone open indefinitely after the user walked away.

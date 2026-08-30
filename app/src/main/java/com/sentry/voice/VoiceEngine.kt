@@ -32,6 +32,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.vosk.Model
 import org.vosk.Recognizer
+import org.vosk.SpeakerModel
 import java.io.File
 import kotlin.math.abs
 import kotlin.math.min
@@ -69,8 +70,29 @@ class VoiceEngine(private val context: Context) {
          *
          * v4 — small en-in and en-us packs, selectable. The large lgraph model was
          *      tried at v2/v3 and could not decode in real time on this hardware.
+         * v5 — adds the speaker model (vosk-model-spk-0.4) alongside.
          */
-        private const val MODEL_VERSION = "4-small-packs"
+        private const val MODEL_VERSION = "5-small-packs-spk"
+
+        /** Vosk's speaker model, for recognising *who* is talking. */
+        private const val SPEAKER_ASSET = "model-spk"
+
+        /**
+         * Frames of actual speech required before a voiceprint is worth comparing.
+         *
+         * Vosk emits no vector at all below 50 frames (MIN_SPK_FEATS in its source),
+         * and the Android example the library's own maintainer points people at uses
+         * 100. Frames are 10 ms of non-silence, so 100 is about a second of speech —
+         * roughly "call amma" and up. Below that the vector is noise wearing a
+         * fingerprint's clothes.
+         */
+        const val MIN_VOICEPRINT_FRAMES = 100
+
+        /**
+         * Vosk scales every emitted x-vector to ||v|| = sqrt(dim), so the cosine of
+         * two of them is just their dot product over the dimension. No norms needed.
+         */
+        const val VOICEPRINT_DIM = 128
 
         /**
          * The wake word, plus Vosk's out-of-vocabulary token.
@@ -162,9 +184,23 @@ class VoiceEngine(private val context: Context) {
         COMMAND,
     }
 
+    /**
+     * An x-vector: a 128-number summary of what a voice sounds like, not of what was
+     * said. [frames] is how much speech backed it, in 10 ms units — the vector gets
+     * meaningfully more reliable the larger this is.
+     */
+    data class Voiceprint(val vector: FloatArray, val frames: Int) {
+        // FloatArray gives reference equality by default, which is never what anyone
+        // wants from a data class.
+        override fun equals(other: Any?): Boolean =
+            other is Voiceprint && frames == other.frames && vector.contentEquals(other.vector)
+
+        override fun hashCode(): Int = 31 * vector.contentHashCode() + frames
+    }
+
     sealed interface Event {
         data object WakeWord : Event
-        data class Transcript(val text: String) : Event
+        data class Transcript(val text: String, val voiceprint: Voiceprint? = null) : Event
 
         /** The user started talking while Sentry was. Stop talking and listen. */
         data object BargeIn : Event
@@ -204,6 +240,21 @@ class VoiceEngine(private val context: Context) {
     private val _events = MutableSharedFlow<Event>(extraBufferCapacity = 16)
     val events: SharedFlow<Event> = _events.asSharedFlow()
 
+    private val _capturing = MutableStateFlow(false)
+
+    /**
+     * Whether the microphone is genuinely open for dictation, right now.
+     *
+     * Exists because the UI used to infer this from the agent's status, which is a
+     * different fact entirely: the agent can be THINKING or SPEAKING while the mic is
+     * wide open for barge-in, and it can be IDLE while the mic is open for a
+     * follow-up. Reporting one as the other told the user "tap the mic" while
+     * recording them, which is the worst way to be wrong about it.
+     *
+     * A StateFlow rather than a getter, because Compose has to be able to observe it.
+     */
+    val capturing: StateFlow<Boolean> = _capturing.asStateFlow()
+
     private val _ready = MutableStateFlow(false)
 
     /** False until the acoustic model has been unpacked and loaded. */
@@ -211,6 +262,9 @@ class VoiceEngine(private val context: Context) {
 
     @Volatile
     private var model: Model? = null
+
+    @Volatile
+    private var speakerModel: SpeakerModel? = null
 
     /** Which pack is loaded right now, so a change can be noticed. */
     @Volatile
@@ -312,6 +366,21 @@ class VoiceEngine(private val context: Context) {
                     unpack(wanted.asset, target)
                 }
                 model = Model(target.absolutePath)
+
+                // Separate native allocation with its own lifetime; it must outlive
+                // every recogniser built against it.
+                if (speakerModel == null) {
+                    val speakerDir = File(context.filesDir, SPEAKER_ASSET)
+                    if (!isUnpacked(speakerDir)) {
+                        Log.i(TAG, "unpacking speaker model")
+                        speakerDir.deleteRecursively()
+                        unpack(SPEAKER_ASSET, speakerDir)
+                    }
+                    speakerModel = runCatching { SpeakerModel(speakerDir.absolutePath) }
+                        .onFailure { Log.w(TAG, "speaker model unavailable", it) }
+                        .getOrNull()
+                }
+
                 loadedPack = wanted
                 _ready.value = true
                 _events.tryEmit(Event.ModelReady)
@@ -406,6 +475,7 @@ class VoiceEngine(private val context: Context) {
                 captureJob?.cancelAndJoin()
                 captureJob = null
                 _mode.value = Mode.OFF
+                _capturing.value = false
                 _partial.value = ""
                 _amplitude.value = 0f
             }
@@ -501,7 +571,16 @@ class VoiceEngine(private val context: Context) {
                     // Alternatives cost real lattice work, and on a large graph that
                     // is the difference between keeping up with the microphone and
                     // not. Only ask for them when a re-ranker will actually use them.
+                    //
+                    // Raising N_BEST would also silently disable speaker ID: Vosk
+                    // emits the x-vector from its MBR result path only, and asking
+                    // for alternatives switches to the N-best path instead.
                     if (N_BEST > 1) setMaxAlternatives(N_BEST)
+
+                    // Only the dictation recogniser gets this. The wake-word and
+                    // barge-in decoders see utterances far too short for a usable
+                    // vector, and each attachment costs its own forward pass.
+                    speakerModel?.let { setSpeakerModel(it) }
                 }
             }
         }.getOrElse {
@@ -534,6 +613,7 @@ class VoiceEngine(private val context: Context) {
         }
 
         Log.d(TAG, "capture started in $mode")
+        if (mode == Mode.COMMAND) _capturing.value = true
 
         // Milliseconds of audio actually consumed, which is not the same as
         // milliseconds elapsed.
@@ -653,7 +733,8 @@ class VoiceEngine(private val context: Context) {
                 }
 
                 if (complete) {
-                    val text = textOf(recogniser.result)
+                    val endpointJson = recogniser.result
+                    val text = textOf(endpointJson)
                     if (text.isNotBlank()) {
                         _partial.value = ""
                         val floor = requiredPeak(spokeAt, now)
@@ -664,8 +745,10 @@ class VoiceEngine(private val context: Context) {
                             continue
                         }
                         val best = withBias(text, biased)
-                        Log.d(TAG, "transcript (endpoint): \"$best\"")
-                        _events.tryEmit(Event.Transcript(best))
+                        val print = voiceprintOf(endpointJson)
+                        Log.d(TAG, "transcript (endpoint): \"$best\"" +
+                            (print?.let { " [voice ${it.frames}f]" } ?: ""))
+                        _events.tryEmit(Event.Transcript(best, print))
                         return@withContext
                     }
                 } else {
@@ -685,12 +768,15 @@ class VoiceEngine(private val context: Context) {
                 val ranLong = now - startedAt > MAX_UTTERANCE_MS
 
                 if (finished || ranLong) {
-                    val text = textOf(recogniser.finalResult).ifBlank { _partial.value }
+                    val finalJson = recogniser.finalResult
+                    val text = textOf(finalJson).ifBlank { _partial.value }
                     _partial.value = ""
                     if (text.isNotBlank() && peak >= requiredPeak(spokeAt, now)) {
                         val best = withBias(text, biased)
-                        Log.d(TAG, "transcript (silence): \"$best\"")
-                        _events.tryEmit(Event.Transcript(best))
+                        val print = voiceprintOf(finalJson)
+                        Log.d(TAG, "transcript (silence): \"$best\"" +
+                            (print?.let { " [voice ${it.frames}f]" } ?: ""))
+                        _events.tryEmit(Event.Transcript(best, print))
                     } else {
                         _events.tryEmit(Event.NoSpeech)
                     }
@@ -703,6 +789,7 @@ class VoiceEngine(private val context: Context) {
                 }
             }
         } finally {
+            _capturing.value = false
             if (audioNanos > 0) {
                 val ratio = decodeNanos.toDouble() / audioNanos
                 val message = "decode %.2fx real time".format(ratio)
@@ -852,6 +939,18 @@ class VoiceEngine(private val context: Context) {
     private fun requiredPeak(spokeAt: Long, now: Long): Float =
         if (spokeAt > 0 && now - spokeAt < ECHO_WINDOW_MS) ECHO_PEAK else NOISE_PEAK
 
+    /**
+     * The speaker vector from a final result, when there was enough speech for Vosk
+     * to produce one. Absent from partial results by construction.
+     */
+    private fun voiceprintOf(json: String?): Voiceprint? = runCatching {
+        val root = JSONObject(json ?: return null)
+        val array = root.optJSONArray("spk") ?: return null
+        val frames = root.optInt("spk_frames", 0)
+        val vector = FloatArray(array.length()) { array.getDouble(it).toFloat() }
+        if (vector.isEmpty()) null else Voiceprint(vector, frames)
+    }.getOrNull()
+
     private fun partialOf(json: String?): String = runCatching {
         JSONObject(json ?: return "").optString("partial").trim()
     }.getOrDefault("")
@@ -859,6 +958,8 @@ class VoiceEngine(private val context: Context) {
     fun close() {
         stop()
         runCatching { model?.close() }
+        runCatching { speakerModel?.close() }
+        speakerModel = null
         model = null
         _ready.value = false
     }
