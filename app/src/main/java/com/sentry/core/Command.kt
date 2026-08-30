@@ -58,6 +58,9 @@ sealed interface Command {
     data object TimeQuery : Command
     data object DateQuery : Command
 
+    /** A sum already worked out; [spoken] is the answer, not the question. */
+    data class Calculate(val expression: String, val spoken: String) : Command
+
     /** Free-form conversation. The only command that necessarily costs a generation. */
     data class Chat(val text: String) : Command
 
@@ -151,7 +154,7 @@ enum class Commit {
 val Command.commit: Commit
     get() = when (this) {
         is Command.TimeQuery, is Command.DateQuery, is Command.BatteryStatus,
-        is Command.Chat -> Commit.PURE
+        is Command.Calculate, is Command.Chat -> Commit.PURE
 
         // Writes a file and flashes the screen, but replaces nothing and harms
         // nothing if it happens twice.

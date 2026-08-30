@@ -113,6 +113,7 @@ class Skills(
         is Command.Dnd -> dnd(command.on)
         Command.OpenCamera -> openCamera()
         Command.BatteryStatus -> battery()
+        is Command.Calculate -> Reply(command.spoken, Chip(ChipIcon.CLOCK, command.expression))
         Command.Screenshot -> screenshot()
         is Command.OpenPanel -> openPanel(command.panel)
 

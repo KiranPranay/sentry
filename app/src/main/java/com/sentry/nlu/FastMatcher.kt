@@ -72,6 +72,7 @@ object FastMatcher {
             ?: matchNavigate(s)
             ?: matchCamera(s)
             ?: matchScreenshot(s)
+            ?: matchArithmetic(raw)
             ?: matchQuery(s)
             ?: matchPanel(s)
             ?: matchOpenApp(s)
@@ -368,6 +369,15 @@ object FastMatcher {
 
     private fun matchCamera(s: String): Command? =
         if (s in CAMERA) Command.OpenCamera else null
+
+    // ----------------------------------------------------------- arithmetic
+
+    /**
+     * Takes the raw utterance rather than the normalised one, because the normaliser
+     * strips the punctuation and casing that [Arithmetic] uses to recognise a sum.
+     */
+    private fun matchArithmetic(raw: String): Command? =
+        Arithmetic.evaluate(raw)?.let { Command.Calculate(it.expression, it.spoken) }
 
     // ---------------------------------------------------------------- query
 
