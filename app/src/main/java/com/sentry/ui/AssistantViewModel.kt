@@ -53,15 +53,6 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         /** Breath between a failed capture and reopening, so the two do not thrash. */
         const val RETRY_DELAY_MS = 250L
 
-        /**
-         * Longest a single session may run, however busy it looks.
-         *
-         * The idle budget alone is not a bound: in a room with a television or a
-         * conversation in it, stray speech keeps resetting it and the microphone
-         * stays open forever. Checked only at a turn boundary, so it can never cut
-         * somebody off mid-sentence — it just declines to start another round.
-         */
-        const val SESSION_MAX_MS = 5 * 60 * 1000L
 
     }
 
@@ -106,6 +97,16 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
 
     private var handling: Job? = null
 
+    /**
+     * The pending "reopen the microphone" for a capture that heard nothing.
+     *
+     * Held so it can be cancelled. It waits a moment before reopening, and a session
+     * ending inside that window used to let it fire anyway: it re-took the microphone
+     * for dictation *after* the wake word had been handed back, and the wake word
+     * never came up again.
+     */
+    private var retry: Job? = null
+
     /** Set once the session is over, so an in-flight reply does not reopen the mic. */
     @Volatile
     private var ended = false
@@ -114,9 +115,6 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     @Volatile
     private var lastInteractionAt = 0L
 
-    /** When this session opened, for the hard cap. */
-    @Volatile
-    private var startedAt = 0L
 
     init {
         viewModelScope.launch {
@@ -193,7 +191,6 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     fun startSession(listenImmediately: Boolean) {
         ended = false
         lastInteractionAt = System.currentTimeMillis()
-        startedAt = lastInteractionAt
         // Carry the conversation over when the user comes straight back: "who wrote
         // Dune" followed a moment later by "when did he die" should still work. After
         // a real gap it starts clean, because stale context is worse than none.
@@ -217,7 +214,10 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
 
     /** Text typed instead of spoken. */
     fun submit(text: String) {
-        voice.stop()
+        // No voice.stop() here. onHeard reopens the microphone immediately, and
+        // startCommand's serialised restart already cancels whatever was running —
+        // the explicit stop only raced it, sometimes landing *after* the reopen and
+        // killing the capture 160ms into its life.
         onHeard(text)
     }
 
@@ -249,7 +249,8 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         // so their attempt counts as activity.
         if (heardSomething) lastInteractionAt = System.currentTimeMillis()
 
-        viewModelScope.launch {
+        retry?.cancel()
+        retry = viewModelScope.launch {
             delay(RETRY_DELAY_MS)
             // No "is it already listening?" guard here, deliberately. The capture
             // that just failed is still unwinding — releasing the recorder and
@@ -263,6 +264,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
 
     private fun onHeard(text: String) {
         lastInteractionAt = System.currentTimeMillis()
+        retry?.cancel()
         handling?.cancel()
         handling = viewModelScope.launch {
             // Reopen the microphone *before* answering, not after. This is what lets
@@ -294,6 +296,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     /** Interrupt whatever is happening — the user tapped away or said "stop". */
     fun cancel() {
         ended = true
+        retry?.cancel()
         handling?.cancel()
         container.speaker.stop()
         voice.stop()
@@ -308,17 +311,19 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
      */
     fun releaseToHotword() {
         ended = true
+        retry?.cancel()
         handling?.cancel()
         container.speaker.stop()
         agent.setListening(false)
 
-        val app = getApplication<Application>()
+        // resume(), not start(). This runs from onStop, by which point the app is
+        // in the background — and a microphone-type foreground service cannot be
+        // started from there on Android 14+. Doing so threw SecurityException and
+        // killed the process every time a session ended. The service never stopped;
+        // it only needs its engine pointed back at the wake word.
         if (container.prefs.hotwordEnabled) {
-            // Deliberately no voice.stop() first. Starting the hotword capture goes
-            // through the engine's own serialised restart, which cancels the command
-            // capture and brings up the wake-word one as a single operation. Stopping
-            // separately here raced the service's start and left the engine off.
-            HotwordService.start(app)
+            Log.d(TAG, "handing the microphone back to the wake word")
+            HotwordService.resume(getApplication())
         } else {
             voice.stop()
         }
@@ -330,7 +335,12 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     override fun onCleared() {
-        cancel()
+        // releaseToHotword, not cancel. onCleared runs *after* onStop has already
+        // handed the microphone back, and cancel() stops the engine outright — so it
+        // killed the wake-word capture a moment after starting it and left the phone
+        // deaf until the app was restarted. Handing back is idempotent; stopping is
+        // not something we want to do twice.
+        releaseToHotword()
         super.onCleared()
     }
 }

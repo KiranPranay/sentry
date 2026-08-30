@@ -44,12 +44,59 @@ class HotwordService : Service() {
         const val ACTION_START = "com.sentry.hotword.START"
         const val ACTION_STOP = "com.sentry.hotword.STOP"
 
+        /**
+         * Whether the service is alive and holding its foreground notification.
+         *
+         * Exists because starting it again is not a harmless no-op: a microphone-type
+         * foreground service cannot legally be started from the background at all on
+         * Android 14+, so callers need to know whether they must start one or merely
+         * ask the running one to resume.
+         */
+        @Volatile
+        var isRunning: Boolean = false
+            private set
+
+        /**
+         * Start the wake word. **Only valid from the foreground.**
+         *
+         * `RECORD_AUDIO` is a while-in-use permission, so a microphone-type
+         * foreground service may only be started while the app is visible. Calling
+         * this from the background throws SecurityException and takes the process
+         * with it — which is exactly what happened when the assistant screen closed
+         * after a long answer and tried to hand the microphone back this way.
+         *
+         * To resume the wake word after the assistant borrowed the mic, use
+         * [resume] instead: the service never stopped, so nothing needs starting.
+         */
         fun start(context: Context) {
             val intent = Intent(context, HotwordService::class.java).setAction(ACTION_START)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
+            runCatching {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
+            }.onFailure {
+                // Backgrounded, or not allowed right now. Not fatal: the user can
+                // turn it on from the setup screen, which is in the foreground.
+                Log.w(TAG, "could not start the wake word service", it)
+            }
+        }
+
+        /**
+         * Hand the microphone back to the wake word.
+         *
+         * Retargets the already-running service's engine rather than touching the
+         * service lifecycle, so it is safe from anywhere — including an activity that
+         * has already stopped. Falls back to starting the service only when it is not
+         * running, which is the case that genuinely needs the foreground.
+         */
+        fun resume(context: Context) {
+            Log.d(TAG, "resume (service running=$isRunning)")
+            if (isRunning) {
+                context.sentry.voice.startHotword()
             } else {
-                context.startService(intent)
+                start(context)
             }
         }
 
@@ -73,20 +120,30 @@ class HotwordService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> {
+                isRunning = false
                 stopListening()
                 stopSelf()
                 return START_NOT_STICKY
             }
         }
 
-        startForegroundCompat()
+        if (!startForegroundCompat()) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
+        isRunning = true
         startListening()
         // Restart if the system kills us: a wake word that silently stops working
         // after a memory-pressure event is worse than one that was never enabled.
         return START_STICKY
     }
 
-    private fun startForegroundCompat() {
+    /**
+     * @return false when the platform refused, in which case the service must not
+     *   continue: an unpromoted service that keeps recording is exactly what the
+     *   restriction exists to prevent.
+     */
+    private fun startForegroundCompat(): Boolean = runCatching {
         val notification = buildNotification()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
@@ -97,6 +154,10 @@ class HotwordService : Service() {
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
+        true
+    }.getOrElse {
+        Log.w(TAG, "refused foreground microphone service; not starting", it)
+        false
     }
 
     /**
@@ -169,6 +230,7 @@ class HotwordService : Service() {
     }
 
     override fun onDestroy() {
+        isRunning = false
         stopListening()
         scope.cancel()
         super.onDestroy()

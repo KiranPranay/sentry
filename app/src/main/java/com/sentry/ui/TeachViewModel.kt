@@ -176,8 +176,13 @@ class TeachViewModel(application: Application) : AndroidViewModel(application) {
         // this screen's capture and brings up the wake-word one as a single
         // operation. Stopping separately raced that restart and won, leaving the
         // wake word dead after every visit to this screen.
+        // resume(), not start(). This runs from onStop, by which point the app is
+        // in the background — and a microphone-type foreground service cannot be
+        // started from there on Android 14+. Doing so threw SecurityException and
+        // killed the process every time a session ended. The service never stopped;
+        // it only needs its engine pointed back at the wake word.
         if (container.prefs.hotwordEnabled) {
-            HotwordService.start(getApplication())
+            HotwordService.resume(getApplication())
         } else {
             voice.stop()
         }

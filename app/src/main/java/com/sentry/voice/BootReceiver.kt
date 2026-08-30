@@ -6,10 +6,13 @@ import android.content.Intent
 import com.sentry.sentry
 
 /**
- * Restores the wake word after a reboot or an app update.
+ * Tries to restore the wake word after a reboot or an app update.
  *
- * Without this, "Sentry" silently stops working every time the phone restarts, and
- * the user has no way to know why.
+ * "Tries", because Android 14+ will not let a microphone-type foreground service
+ * start from the background, and a boot broadcast is the background. [HotwordService.start]
+ * swallows the refusal rather than crashing, and the setup screen — which is in the
+ * foreground by definition — is where it reliably comes back. Attempting it costs
+ * nothing and works on the older releases where it is still permitted.
  */
 class BootReceiver : BroadcastReceiver() {
 
