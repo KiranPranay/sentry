@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+      Debug-only test harness. Lives in the debug source set so it cannot ship: an
+      exported receiver that makes the assistant do things is a security surface, and
+      it has no business existing in a release build.
+    -->
+    <application>
+        <receiver
+            android:name="com.sentry.debug.TestReceiver"
+            android:exported="true" />
+    </application>
+</manifest>

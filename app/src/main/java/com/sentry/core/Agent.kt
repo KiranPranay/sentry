@@ -6,14 +6,17 @@ import com.sentry.brain.Brains
 import com.sentry.brain.Msg
 import com.sentry.brain.NoBrainException
 import com.sentry.brain.Role
+import com.sentry.data.Memory
 import com.sentry.data.PhraseBook
 import com.sentry.nlu.ChatPrompt
+import com.sentry.nlu.FactMatcher
 import com.sentry.nlu.FastMatcher
 import com.sentry.nlu.Planner
 import com.sentry.nlu.ReplyCleaner
 import com.sentry.skills.Skills
 import com.sentry.voice.Speaker
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -41,6 +44,7 @@ class Agent(
     private val brains: Brains,
     private val speaker: Speaker,
     private val phrases: PhraseBook,
+    private val memory: Memory,
 ) {
 
     private companion object {
@@ -48,6 +52,21 @@ class Agent(
 
         /** Turns of context kept for the model. Short on purpose: prompt eval costs time. */
         const val HISTORY_TURNS = 6
+
+        /**
+         * How long a command that cannot be taken back waits to see if the sentence
+         * was actually finished.
+         *
+         * The recogniser ends a turn on a pause, so "call amma" and "call amma when
+         * you get a chance" look identical for a moment. Waiting before dialling is
+         * the only ordering that can be correct — undoing afterwards cannot work,
+         * because the phone is already ringing by the time the rest arrives.
+         *
+         * Short enough to be invisible against a call that takes seconds to connect,
+         * and paid only by commands that reach somebody. The torch still fires in
+         * about ten milliseconds.
+         */
+        const val CONTINUATION_MS = 400L
 
         /**
          * How long a conversation stays resumable after the last thing said.
@@ -76,6 +95,12 @@ class Agent(
 
     private val history = mutableListOf<Msg>()
 
+    /** Fragments joined so far while waiting to see whether a sentence was finished. */
+    private var pending: String = ""
+
+    /** Bumped per deferred utterance, so an older wait knows it has been superseded. */
+    private var pendingId: Long = 0
+
     private var lastSpokeAt = 0L
 
     private val _ended = MutableStateFlow(false)
@@ -88,8 +113,21 @@ class Agent(
         else if (_status.value == Status.LISTENING) _status.value = Status.IDLE
     }
 
+    /**
+     * Abandon a half-stitched sentence.
+     *
+     * Called when a session ends mid-wait, so the fragment cannot resurface glued to
+     * the front of whatever is said next time.
+     */
+    fun forgetPending() {
+        pending = ""
+        pendingId++
+    }
+
     /** Start a fresh conversation, discarding everything said before. */
     fun reset() {
+        pending = ""
+        pendingId++
         history.clear()
         _transcript.value = emptyList()
         _status.value = Status.IDLE
@@ -129,11 +167,27 @@ class Agent(
         }
 
         _expectsAnswer.value = false
-        Log.i(TAG, "heard: \"$text\"")
-        addTurn(Party.USER, text)
+
+        // Stitching, done before anything commits rather than by undoing afterwards.
+        // A fragment that would merely answer a question or flip a switch runs now;
+        // one that would dial a number or set an alarm waits to see whether the
+        // speaker had finished.
+        val stitched = awaitCompleteUtterance(text)
+        if (stitched == null) {
+            Log.d(TAG, "\"$text\" superseded by a continuation")
+            return
+        }
+
+        Log.i(TAG, "heard: \"$stitched\"")
+        addTurn(Party.USER, stitched)
+
+        // Notice anything durable the user just said about themselves. Deterministic
+        // and free, so it runs on every turn without the model being involved — and
+        // it happens before the reply, so an answer can already use what was learned.
+        rememberFacts(stitched)
 
         try {
-            val fast = FastMatcher.match(text)
+            val fast = FastMatcher.match(stitched)
             if (fast != null) {
                 Log.d(TAG, "fast path: $fast")
                 if (fast is Command.Stop) {
@@ -142,22 +196,72 @@ class Agent(
                     _ended.value = true
                     return
                 }
-                execute(fast, text)
+                execute(fast, stitched)
                 return
             }
 
             _status.value = Status.THINKING
-            val planned = planner.plan(text, history.toList())
-            if (planned is Command.Chat) converse(text) else execute(planned, text)
+            val planned = planner.plan(stitched, history.toList())
+            if (planned is Command.Chat) converse(stitched) else execute(planned, stitched)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.e(TAG, "failed to handle \"$text\"", e)
+            Log.e(TAG, "failed to handle \"$stitched\"", e)
             respond(Reply.error(explain(e)))
         } finally {
             lastSpokeAt = System.currentTimeMillis()
             if (_status.value != Status.LISTENING) _status.value = Status.IDLE
         }
+    }
+
+    /**
+     * Record any facts the utterance stated about the user.
+     *
+     * Silent by design. Announcing "I'll remember that your mother is Rani" after an
+     * aside would be insufferable; the memory screen is where this is visible, and
+     * the transcript keeps the sentence it came from.
+     */
+    private fun rememberFacts(text: String) {
+        for ((fact, value) in FactMatcher.find(text)) {
+            if (memory.remember(fact, value, source = text)) {
+                Log.i(TAG, "remembered ${fact.name} = \"$value\"")
+            }
+        }
+    }
+
+    /**
+     * Wait, if necessary, for the rest of a sentence the recogniser cut short.
+     *
+     * Returns the utterance to act on — possibly several fragments joined — or null
+     * when this call has been superseded because a continuation arrived and a later
+     * invocation now owns the joined text.
+     *
+     * Only commands that cannot be undone pay the wait. Deciding that requires
+     * classifying the fragment first, which is a regex and free.
+     */
+    private suspend fun awaitCompleteUtterance(text: String): String? {
+        val risk = FastMatcher.match(text)?.commit ?: Commit.PURE
+
+        // Once a sentence is being stitched, every later fragment joins it whatever
+        // it looks like on its own. A continuation such as "tomorrow morning" parses
+        // as harmless conversation in isolation, and running it alone would answer
+        // something nobody asked while quietly dropping the "call amma" it belonged to.
+        val continuing = pending.isNotBlank()
+        if (!continuing && risk != Commit.IRREVERSIBLE && risk != Commit.RELATIVE) {
+            return text
+        }
+
+        val id = ++pendingId
+        pending = if (pending.isBlank()) text else "${pending.trimEnd()} $text"
+
+        delay(CONTINUATION_MS)
+
+        // Somebody else arrived while we waited; the joined text is theirs to run.
+        if (id != pendingId) return null
+
+        val whole = pending
+        pending = ""
+        return whole
     }
 
     /** Run a command and speak whatever it reports. */
@@ -177,7 +281,11 @@ class Agent(
      */
     private suspend fun converse(text: String) {
         val messages = buildList {
-            add(Msg(Role.SYSTEM, ChatPrompt.SYSTEM))
+            // The whole memory, not a relevant subset. It is a dozen short values by
+            // construction, which is cheaper than any scheme for deciding relevance
+            // and removes the need for a retrieval step entirely.
+            val known = memory.asPromptContext()
+            add(Msg(Role.SYSTEM, if (known.isBlank()) ChatPrompt.SYSTEM else "${ChatPrompt.SYSTEM}\n\n$known"))
             addAll(history)
             add(Msg(Role.USER, text))
         }

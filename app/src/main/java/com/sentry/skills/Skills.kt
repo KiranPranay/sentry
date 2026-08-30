@@ -23,12 +23,17 @@ import android.telecom.TelecomManager
 import android.util.Log
 import android.view.KeyEvent
 import androidx.core.content.ContextCompat
+import com.sentry.core.Channel
 import com.sentry.core.Chip
 import com.sentry.core.ChipIcon
 import com.sentry.core.Command
 import com.sentry.core.MediaAction
 import com.sentry.core.Panel
+import com.sentry.core.Provider
+import com.sentry.data.Fact
+import com.sentry.data.Memory
 import com.sentry.core.Reply
+import com.sentry.service.ScreenshotService
 import com.sentry.core.VolumeChange
 import java.text.SimpleDateFormat
 import java.util.Calendar
@@ -41,10 +46,22 @@ import java.util.Locale
  * missing permission is something to say out loud and offer to fix, not a stack
  * trace. Nothing here touches a language model.
  */
-class Skills(private val context: Context) {
+class Skills(
+    private val context: Context,
+    private val memory: Memory,
+) {
 
     private companion object {
         const val TAG = "Sentry/Skills"
+
+        /**
+         * Assumed when a stored number has no country code.
+         *
+         * WhatsApp addresses people internationally and will not find a bare local
+         * number. India, because that is where this phone and its address book are;
+         * a number already carrying a "+" is left exactly as it is.
+         */
+        const val DEFAULT_COUNTRY_CODE = "91"
     }
 
     private val contacts = Contacts(context)
@@ -83,7 +100,7 @@ class Skills(private val context: Context) {
         Command.HangUp -> hangUp()
         is Command.SendMessage -> sendMessage(command)
 
-        is Command.PlayMusic -> playMusic(command.query)
+        is Command.PlayMusic -> playMusic(command.query, command.provider)
         is Command.MediaControl -> mediaControl(command.action)
 
         is Command.Torch -> torch(command.on)
@@ -91,6 +108,7 @@ class Skills(private val context: Context) {
         is Command.Dnd -> dnd(command.on)
         Command.OpenCamera -> openCamera()
         Command.BatteryStatus -> battery()
+        Command.Screenshot -> screenshot()
         is Command.OpenPanel -> openPanel(command.panel)
 
         is Command.OpenApp -> openApp(command.name)
@@ -165,12 +183,33 @@ class Skills(private val context: Context) {
 
     // ---------------------------------------------------------------- comms
 
+    /**
+     * Turn a relationship into a name, if Sentry has been told one.
+     *
+     * "Call mom" is not a name at all, and no amount of fuzzy matching against the
+     * address book will make it one. But if the user has said "my mother is Maa" at
+     * some point, that is exactly the missing link — so kinship words resolve through
+     * memory before the contact search sees them.
+     */
+    private fun resolveRelation(query: String): String {
+        val fact = when (query.trim().lowercase()) {
+            "mom", "mum", "mother", "amma", "mummy", "ma" -> Fact.MOTHER
+            "dad", "father", "daddy", "papa", "nanna", "appa" -> Fact.FATHER
+            "wife", "husband", "partner" -> Fact.SPOUSE
+            "brother", "sister", "sibling" -> Fact.SIBLING
+            else -> return query
+        }
+        val known = memory[fact] ?: return query
+        Log.d(TAG, "\"$query\" -> \"$known\" (remembered)")
+        return known
+    }
+
     private fun call(query: String): Reply {
         if (!has(Manifest.permission.CALL_PHONE) || !contacts.hasPermission()) {
             return needsPermission("I need permission to see your contacts and place calls.")
         }
 
-        val matches = contacts.find(query)
+        val matches = contacts.find(resolveRelation(query))
         return when {
             matches.isEmpty() -> Reply("I couldn't find anyone called $query.")
             matches.size == 1 -> placeCall(matches[0].number, matches[0].name)
@@ -226,13 +265,14 @@ class Skills(private val context: Context) {
         if (!contacts.hasPermission()) {
             return needsPermission("I need permission to see your contacts.")
         }
-        val matches = contacts.find(command.query)
+        val who = resolveRelation(command.query)
+        val matches = contacts.find(who)
         return when {
-            matches.isEmpty() -> Reply("I couldn't find anyone called ${command.query}.")
-            matches.size == 1 -> compose(matches[0], command.body)
+            matches.isEmpty() -> Reply("I couldn't find anyone called $who.")
+            matches.size == 1 -> compose(matches[0], command.body, command.channel)
             else -> {
                 pendingChoices = matches
-                pendingAction = { compose(it, command.body) }
+                pendingAction = { compose(it, command.body, command.channel) }
                 Reply.ask(
                     "I found ${matches.size} matches. Which one?",
                     matches.map { it.name },
@@ -247,23 +287,87 @@ class Skills(private val context: Context) {
      * Sending silently would need SEND_SMS and would mean a misheard word goes out
      * to a real person with no chance to catch it. One tap is the right price.
      */
-    private fun compose(match: ContactMatch, body: String?): Reply {
-        val intent = Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:${match.number}")).apply {
-            body?.let { putExtra("sms_body", it) }
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    private fun compose(match: ContactMatch, body: String?, channel: Channel): Reply {
+        val intent = when (channel) {
+            Channel.WHATSAPP -> whatsAppIntent(match, body)
+            Channel.SMS -> Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:${match.number}")).apply {
+                body?.let { putExtra("sms_body", it) }
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+        } ?: return Reply("WhatsApp isn't installed.")
+
+        if (!canResolve(intent)) {
+            return Reply.error("There's no ${channel.label} app that can do that.")
         }
-        if (!canResolve(intent)) return Reply.error("There's no messaging app on this phone.")
         context.startActivity(intent)
+
+        // Still opens the composer rather than sending, on every channel. A misheard
+        // word reaching a real person is not something one tap is too high a price to
+        // prevent — and it matters more on WhatsApp, where there is no undo at all.
         return if (body != null) {
-            Reply("Ready to send to ${match.name}. Tap send.", Chip(ChipIcon.MESSAGE, match.name))
+            Reply(
+                "Ready to send to ${match.name} on ${channel.label}. Tap send.",
+                Chip(ChipIcon.MESSAGE, match.name),
+            )
         } else {
-            Reply("Opening a message to ${match.name}.", Chip(ChipIcon.MESSAGE, match.name))
+            Reply(
+                "Opening ${channel.label} for ${match.name}.",
+                Chip(ChipIcon.MESSAGE, match.name),
+            )
         }
+    }
+
+    /**
+     * WhatsApp wants an international number with no punctuation, and silently shows
+     * "not on WhatsApp" for anything else — so the number is normalised here rather
+     * than handed over as the address book stores it.
+     */
+    private fun whatsAppIntent(match: ContactMatch, body: String?): Intent? {
+        if (!isInstalled(Channel.WHATSAPP.packageName!!)) return null
+
+        val digits = match.number.filter { it.isDigit() }
+        val international = when {
+            match.number.trim().startsWith("+") -> digits
+            digits.length == 10 -> DEFAULT_COUNTRY_CODE + digits
+            else -> digits
+        }
+
+        val url = buildString {
+            append("https://wa.me/").append(international)
+            body?.let { append("?text=").append(Uri.encode(it)) }
+        }
+        return Intent(Intent.ACTION_VIEW, Uri.parse(url))
+            .setPackage(Channel.WHATSAPP.packageName)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     }
 
     // ---------------------------------------------------------------- media
 
-    private fun playMusic(query: String?): Reply {
+    /**
+     * Take a screenshot.
+     *
+     * Through an accessibility service, because that is the only route an app has:
+     * MediaProjection would throw up a consent dialog every single time, which is
+     * unusable for a voice command. The service is off until the user turns it on,
+     * and this says so rather than failing silently.
+     */
+    private fun screenshot(): Reply {
+        if (!ScreenshotService.isEnabled(context)) {
+            return needsSetting(
+                "To take screenshots I need Sentry's accessibility service turned on.",
+                Settings.ACTION_ACCESSIBILITY_SETTINGS,
+            )
+        }
+        return if (ScreenshotService.take()) {
+            Reply("Screenshot taken.", Chip(ChipIcon.CAMERA, "Screenshot"))
+        } else {
+            Reply.error("I couldn't take the screenshot.")
+        }
+    }
+
+    private fun playMusic(query: String?, provider: Provider?): Reply {
+        if (provider != null) return playOn(provider, query)
+
         val intent = Intent(MediaStore.INTENT_ACTION_MEDIA_PLAY_FROM_SEARCH).apply {
             putExtra(SearchManager.QUERY, query ?: "")
             if (query == null) {
@@ -272,17 +376,85 @@ class Skills(private val context: Context) {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         if (!canResolve(intent)) {
-            // Nothing handles the media search intent; fall back to whatever music
-            // app exists rather than telling the user "no".
             return Reply.error("I couldn't find a music app that can search.")
         }
-        context.startActivity(intent)
+        context.startActivity(preferSystemHandler(intent))
         return if (query == null) {
             Reply("Playing music.", Chip(ChipIcon.MUSIC, "Music"))
         } else {
             Reply("Playing $query.", Chip(ChipIcon.MUSIC, query))
         }
     }
+
+    /**
+     * Play something in a named app.
+     *
+     * Each provider gets the media-search intent aimed at its package first, because
+     * that is the one that actually starts playback rather than just opening a search
+     * box. Where the app does not handle it, a deep link is the fallback, and simply
+     * opening the app is the last resort — better than telling the user no.
+     */
+    private fun playOn(provider: Provider, query: String?): Reply {
+        val target = resolveProvider(provider)
+            ?: return Reply("${provider.label} isn't installed.")
+
+        val search = Intent(MediaStore.INTENT_ACTION_MEDIA_PLAY_FROM_SEARCH).apply {
+            setPackage(target)
+            putExtra(SearchManager.QUERY, query.orEmpty())
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        if (query != null && canResolve(search)) {
+            context.startActivity(search)
+            return Reply("Playing $query on ${provider.label}.", Chip(ChipIcon.MUSIC, provider.label))
+        }
+
+        val deepLink = query?.let { deepLinkFor(provider, target, it) }
+        if (deepLink != null && canResolve(deepLink)) {
+            context.startActivity(deepLink)
+            return Reply("Searching ${provider.label} for $query.", Chip(ChipIcon.MUSIC, provider.label))
+        }
+
+        val launch = apps.launchIntent(target)
+            ?: return Reply.error("I couldn't open ${provider.label}.")
+        context.startActivity(launch)
+        return Reply("Opening ${provider.label}.", Chip(ChipIcon.MUSIC, provider.label))
+    }
+
+    private fun deepLinkFor(provider: Provider, target: String, query: String): Intent? {
+        val encoded = Uri.encode(query)
+        val uri = when (provider) {
+            Provider.SPOTIFY -> "spotify:search:$encoded"
+            Provider.YOUTUBE -> "https://www.youtube.com/results?search_query=$encoded"
+            Provider.YOUTUBE_MUSIC -> "https://music.youtube.com/search?q=$encoded"
+        }
+        return Intent(Intent.ACTION_VIEW, Uri.parse(uri))
+            .setPackage(target)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+
+    /**
+     * The package that will actually play this, or null if nothing will.
+     *
+     * Prefers the official app, then falls back to whatever the launcher shows under
+     * that name — which is how a replaced or modded client gets found. The user asked
+     * for "YouTube Music"; which build of it they run is not their problem.
+     */
+    private fun resolveProvider(provider: Provider): String? {
+        if (isInstalled(provider.canonical)) return provider.canonical
+
+        for (name in listOf(provider.label) + provider.aliases) {
+            val found = apps.find(name) ?: continue
+            // "Music" is a loose alias and could match a media player that is not this
+            // provider at all, so anything matched loosely still has to look related.
+            Log.i(TAG, "${provider.label}: using ${found.packageName} as \"${found.label}\"")
+            return found.packageName
+        }
+        return null
+    }
+
+    private fun isInstalled(packageName: String): Boolean = runCatching {
+        context.packageManager.getApplicationInfo(packageName, 0).enabled
+    }.getOrDefault(false)
 
     private fun mediaControl(action: MediaAction): Reply {
         val audio = context.getSystemService(AudioManager::class.java)

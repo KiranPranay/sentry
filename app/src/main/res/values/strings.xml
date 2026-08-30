@@ -1,3 +1,5 @@
 <resources>
     <string name="app_name">Sentry</string>
+    <string name="screenshot_service_label">Sentry screenshots</string>
+    <string name="screenshot_service_description">Lets Sentry take a screenshot when you ask. It does not read your screen — it only uses the system screenshot action.</string>
 </resources>

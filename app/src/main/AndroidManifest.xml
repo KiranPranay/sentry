@@ -157,6 +157,24 @@
                 android:resource="@xml/recognition_service" />
         </service>
 
+        <!--
+          Screenshots. An accessibility service is the only way an app can take one
+          without a consent dialog every time; this one watches nothing and uses only
+          the global screenshot action.
+        -->
+        <service
+            android:name=".service.ScreenshotService"
+            android:exported="false"
+            android:label="@string/screenshot_service_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/screenshot_service" />
+        </service>
+
         <!-- Brings the wake word back after a reboot, if the user had it on. -->
         <receiver
             android:name=".voice.BootReceiver"

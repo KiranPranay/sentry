@@ -298,6 +298,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         ended = true
         retry?.cancel()
         handling?.cancel()
+        agent.forgetPending()
         container.speaker.stop()
         voice.stop()
         agent.setListening(false)
@@ -313,6 +314,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         ended = true
         retry?.cancel()
         handling?.cancel()
+        agent.forgetPending()
         container.speaker.stop()
         agent.setListening(false)
 

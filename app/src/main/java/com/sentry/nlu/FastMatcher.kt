@@ -1,8 +1,10 @@
 package com.sentry.nlu
 
+import com.sentry.core.Channel
 import com.sentry.core.Command
 import com.sentry.core.MediaAction
 import com.sentry.core.Panel
+import com.sentry.core.Provider
 import com.sentry.core.VolumeChange
 
 /**
@@ -69,6 +71,7 @@ object FastMatcher {
             ?: matchMessage(s)
             ?: matchNavigate(s)
             ?: matchCamera(s)
+            ?: matchScreenshot(s)
             ?: matchQuery(s)
             ?: matchPanel(s)
             ?: matchOpenApp(s)
@@ -212,7 +215,30 @@ object FastMatcher {
         else -> null
     }
 
+    // ----------------------------------------------------------- screenshot
+
+    private val SCREENSHOT = setOf(
+        "take a screenshot", "screenshot", "take screenshot", "capture the screen",
+        "take a screen shot", "screen shot", "grab the screen",
+    )
+
+    private fun matchScreenshot(s: String): Command? =
+        if (s in SCREENSHOT) Command.Screenshot else null
+
     // ---------------------------------------------------------------- music
+
+    /**
+     * Apps people name when they say where to play something.
+     *
+     * Matched on the words actually spoken rather than the package label, so
+     * "youtube music" has to be tried before "youtube" or it never wins.
+     */
+    private val PROVIDERS: List<Pair<Regex, Provider>> = listOf(
+        Regex("""\b(?:on |in |using )?youtube music\b""") to Provider.YOUTUBE_MUSIC,
+        Regex("""\b(?:on |in |using )?yt music\b""") to Provider.YOUTUBE_MUSIC,
+        Regex("""\b(?:on |in |using )?spotify\b""") to Provider.SPOTIFY,
+        Regex("""\b(?:on |in |using )?youtube\b""") to Provider.YOUTUBE,
+    )
 
     private val PLAY = Regex("""^play\s+(.+)$""")
     private val GENERIC_MUSIC = setOf(
@@ -222,10 +248,22 @@ object FastMatcher {
 
     private fun matchMusic(s: String): Command? {
         val what = PLAY.find(s)?.groupValues?.get(1) ?: return null
-        if (what in GENERIC_MUSIC) return Command.PlayMusic(null)
-        // "play <x> on youtube" — strip the destination, the media intent picks it.
-        val cleaned = what.replace(Regex("""\s+on\s+(spotify|youtube|youtube music|music)$"""), "")
-        return Command.PlayMusic(cleaned.trim().ifBlank { null })
+
+        // "play something on Spotify" names both the thing and the place; take the
+        // place out so it does not end up in the search query.
+        var query = what
+        var provider: Provider? = null
+        for ((pattern, candidate) in PROVIDERS) {
+            if (pattern.containsMatchIn(query)) {
+                provider = candidate
+                query = pattern.replace(query, " ")
+                break
+            }
+        }
+        query = query.replace(Regex("""\s+"""), " ").trim().removeSuffix(" on").trim()
+
+        if (query.isBlank() || query in GENERIC_MUSIC) return Command.PlayMusic(null, provider)
+        return Command.PlayMusic(query, provider)
     }
 
     // --------------------------------------------------------------- volume
@@ -288,6 +326,8 @@ object FastMatcher {
 
     // -------------------------------------------------------------- message
 
+    private val WHATSAPP = Regex("""\b(?:on |in |via |using )?whats ?app\b""")
+
     private val MESSAGE = Regex(
         """^(?:text|message|sms|whatsapp)\s+(.+?)(?:\s+(?:saying|that says|and say|with)\s+(.+))?$"""
     )
@@ -297,10 +337,16 @@ object FastMatcher {
 
     private fun matchMessage(s: String): Command? {
         val m = SEND_MESSAGE.find(s) ?: MESSAGE.find(s) ?: return null
-        val who = m.groupValues[1].trim()
-        if (who.isBlank() || who.length > 40) return null
+        var who = m.groupValues[1].trim()
         val body = m.groupValues.getOrNull(2)?.trim()?.ifBlank { null }
-        return Command.SendMessage(who, body)
+
+        // The channel can be named at either end — "whatsapp mum" or "text mum on
+        // whatsapp" — and either way it is not part of the person's name.
+        val channel = if (WHATSAPP.containsMatchIn(s)) Channel.WHATSAPP else Channel.SMS
+        who = WHATSAPP.replace(who, " ").replace(Regex("""\s+"""), " ").trim()
+
+        if (who.isBlank() || who.length > 40) return null
+        return Command.SendMessage(who, body, channel)
     }
 
     // ------------------------------------------------------------- navigate

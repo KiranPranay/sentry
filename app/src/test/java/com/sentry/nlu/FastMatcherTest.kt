@@ -1,6 +1,8 @@
 package com.sentry.nlu
 
+import com.sentry.core.Channel
 import com.sentry.core.Command
+import com.sentry.core.Provider
 import com.sentry.core.MediaAction
 import com.sentry.core.VolumeChange
 import org.junit.Assert.assertEquals
@@ -128,9 +130,74 @@ class FastMatcherTest {
     @Test
     fun `plays music`() {
         assertEquals(Command.PlayMusic(null), FastMatcher.match("play some music"))
-        assertEquals(Command.PlayMusic("bohemian rhapsody"), FastMatcher.match("play bohemian rhapsody"))
-        // The destination is not part of the search query.
-        assertEquals(Command.PlayMusic("hello"), FastMatcher.match("play hello on spotify"))
+        assertEquals(
+            Command.PlayMusic("bohemian rhapsody"),
+            FastMatcher.match("play bohemian rhapsody"),
+        )
+        // A named destination is now carried rather than discarded — see the
+        // provider tests below.
+        assertEquals(
+            Command.PlayMusic("hello", Provider.SPOTIFY),
+            FastMatcher.match("play hello on spotify"),
+        )
+    }
+
+    // --------------------------------------------------------------- providers
+
+    @Test
+    fun `naming an app routes playback there`() {
+        assertEquals(
+            Command.PlayMusic("despacito", Provider.SPOTIFY),
+            FastMatcher.match("play despacito on spotify"),
+        )
+        assertEquals(
+            Command.PlayMusic("lofi beats", Provider.YOUTUBE),
+            FastMatcher.match("play lofi beats on youtube"),
+        )
+        // "youtube music" must beat "youtube", or it never wins.
+        assertEquals(
+            Command.PlayMusic("arijit singh", Provider.YOUTUBE_MUSIC),
+            FastMatcher.match("play arijit singh on youtube music"),
+        )
+    }
+
+    @Test
+    fun `the destination is not part of the search`() {
+        val played = FastMatcher.match("play tum hi ho on spotify") as Command.PlayMusic
+        assertEquals("tum hi ho", played.query)
+    }
+
+    @Test
+    fun `an app with nothing named just opens it`() {
+        assertEquals(
+            Command.PlayMusic(null, Provider.SPOTIFY),
+            FastMatcher.match("play some music on spotify"),
+        )
+    }
+
+    // ---------------------------------------------------------------- messaging
+
+    @Test
+    fun `whatsapp is recognised as a channel, not a name`() {
+        assertEquals(
+            Command.SendMessage("mom", null, Channel.WHATSAPP),
+            FastMatcher.match("whatsapp mom"),
+        )
+        assertEquals(
+            Command.SendMessage("ravi", "running late", Channel.WHATSAPP),
+            FastMatcher.match("message ravi on whatsapp saying running late"),
+        )
+        // Without it named, an SMS.
+        assertEquals(
+            Command.SendMessage("ravi", "running late", Channel.SMS),
+            FastMatcher.match("text ravi saying running late"),
+        )
+    }
+
+    @Test
+    fun `screenshots`() {
+        assertEquals(Command.Screenshot, FastMatcher.match("take a screenshot"))
+        assertEquals(Command.Screenshot, FastMatcher.match("screenshot"))
     }
 
     // ------------------------------------------------------------------ volume

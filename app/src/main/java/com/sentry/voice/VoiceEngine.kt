@@ -71,8 +71,9 @@ class VoiceEngine(private val context: Context) {
          * v4 — small en-in and en-us packs, selectable. The large lgraph model was
          *      tried at v2/v3 and could not decode in real time on this hardware.
          * v5 — adds the speaker model (vosk-model-spk-0.4) alongside.
+         * v6 — endpointing relaxed at unpack time so turns are not cut mid-sentence.
          */
-        private const val MODEL_VERSION = "5-small-packs-spk"
+        private const val MODEL_VERSION = "6-relaxed-endpointing"
 
         /** Vosk's speaker model, for recognising *who* is talking. */
         private const val SPEAKER_ASSET = "model-spk"
@@ -108,8 +109,19 @@ class VoiceEngine(private val context: Context) {
         /** Vosk's out-of-vocabulary token, allowed in every grammar. */
         private const val UNKNOWN_TOKEN = "[unk]"
 
-        /** Stop dictating after this much silence following speech. */
-        private const val TRAILING_SILENCE_MS = 900L
+        /**
+         * Silence after speech that ends a turn.
+         *
+         * This, not Kaldi, is what was cutting people off mid-sentence. Kaldi's own
+         * endpoint rules are conditional — rule2's half second only fires when the
+         * language model already believes the sentence is finished — but this timer
+         * is unconditional, so it bounded every ordinary hesitation at 900 ms. People
+         * pause longer than that while choosing a word.
+         *
+         * Raised rather than removed: something has to end the turn, and past about
+         * a second and a half the wait starts to read as the assistant not listening.
+         */
+        private const val TRAILING_SILENCE_MS = 1_400L
 
         /** Give up if the user says nothing at all. */
         private const val NO_SPEECH_TIMEOUT_MS = 6_000L
@@ -129,8 +141,21 @@ class VoiceEngine(private val context: Context) {
          */
         private const val N_BEST = 1
 
-        /** Level above which a frame counts as somebody talking. */
+        /** Level above which a frame starts counting as somebody talking. */
         private const val SPEECH_LEVEL = 0.08f
+
+        /**
+         * Level that counts as *still* talking, once they have started.
+         *
+         * Hysteresis, and it fixes a genuine mid-word cutoff. Speech is not level:
+         * it dips through consonants, unstressed syllables and the tail of a
+         * sentence. With a single 0.08 threshold those dips counted as silence, so a
+         * quiet or trailing-off talker accumulated a "pause" while audibly still
+         * speaking and the turn ended in the middle of a word. Coming down to 0.045
+         * to *hold* a turn open, while still needing 0.08 to open one, keeps room
+         * tone out without punishing anyone for not shouting.
+         */
+        private const val SUSTAIN_LEVEL = 0.045f
 
         /**
          * Peak below which nothing is speech, at any distance.
@@ -454,7 +479,40 @@ class VoiceEngine(private val context: Context) {
 
     private fun unpack(assetPath: String, target: File) {
         copyAsset(assetPath, target)
+        tuneEndpointing(target)
         File(target, ".complete").writeText(MODEL_VERSION)
+    }
+
+    /**
+     * Relax Kaldi's endpointing in the unpacked copy.
+     *
+     * Done in code rather than by editing the model's own conf, because the models
+     * are fetched rather than vendored — an edit to a downloaded file would be
+     * silently undone the next time anyone ran scripts/fetch-models.sh, and the
+     * assistant would quietly go back to interrupting people.
+     *
+     * Kaldi's stock rule2 ends a turn after half a second of silence *once the
+     * language model thinks the sentence is complete*, which is precisely the pause
+     * someone takes mid-instruction after a clause that happens to parse. The values
+     * here buy roughly another third of a second before the decoder gives up on you.
+     */
+    private fun tuneEndpointing(modelDir: File) {
+        val conf = File(modelDir, "conf/model.conf")
+        if (!conf.exists()) return
+
+        val replacements = mapOf(
+            "--endpoint.rule2.min-trailing-silence" to "0.8",
+            "--endpoint.rule3.min-trailing-silence" to "1.2",
+            "--endpoint.rule4.min-trailing-silence" to "2.0",
+        )
+        runCatching {
+            val tuned = conf.readLines().map { line ->
+                val key = line.substringBefore('=').trim()
+                replacements[key]?.let { "$key=$it" } ?: line
+            }
+            conf.writeText(tuned.joinToString("\n") + "\n")
+            Log.i(TAG, "relaxed endpointing in ${modelDir.name}")
+        }.onFailure { Log.w(TAG, "could not tune endpointing", it) }
     }
 
     private fun copyAsset(assetPath: String, target: File) {
@@ -748,7 +806,11 @@ class VoiceEngine(private val context: Context) {
                 }
 
                 if (level > peak) peak = level
-                if (level > SPEECH_LEVEL) {
+                // Opening a turn takes SPEECH_LEVEL; holding one open only takes
+                // SUSTAIN_LEVEL, so the quiet parts of a sentence do not read as its
+                // end.
+                val threshold = if (heardAnything) SUSTAIN_LEVEL else SPEECH_LEVEL
+                if (level > threshold) {
                     lastSpeechAt = now
                     heardAnything = true
                 }

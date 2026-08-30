@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Deliberately minimal. No event types, no package filter, no window content: this
+  service exists only to call performGlobalAction(GLOBAL_ACTION_TAKE_SCREENSHOT), and
+  asking for anything more would be claiming a capability it never uses.
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:canTakeScreenshot="true"
+    android:description="@string/screenshot_service_description"
+    android:notificationTimeout="1000"
+    android:settingsActivity="com.sentry.ui.HomeActivity" />

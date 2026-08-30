@@ -4,11 +4,13 @@ import android.app.Application
 import android.content.Context
 import com.sentry.brain.Brains
 import com.sentry.core.Agent
+import com.sentry.data.Memory
 import com.sentry.data.PhraseBook
 import com.sentry.data.VoiceProfile
 import com.sentry.data.Prefs
 import com.sentry.nlu.FastMatcher
 import com.sentry.nlu.Planner
+import com.sentry.skills.Apps
 import com.sentry.skills.Contacts
 import com.sentry.skills.Skills
 import com.sentry.voice.Speaker
@@ -46,6 +48,7 @@ class Container(context: Context) {
     val prefs = Prefs(appContext)
     val phrases = PhraseBook(appContext)
     val voiceProfile = VoiceProfile(appContext)
+    val memory = Memory(appContext)
 
     val voice = VoiceEngine(appContext).apply {
         pack = prefs.speechPack
@@ -59,10 +62,13 @@ class Container(context: Context) {
     val brains = Brains(appContext, prefs.backendPreference())
 
     private val contacts = Contacts(appContext)
-    private val skills = Skills(appContext)
+
+    /** Exposed for the debug test harness. */
+    val appsIndex = Apps(appContext)
+    private val skills = Skills(appContext, memory)
     private val planner = Planner(brains)
 
-    val agent = Agent(skills, planner, brains, speaker, phrases)
+    val agent = Agent(skills, planner, brains, speaker, phrases, memory)
 
     /**
      * Warm everything that would otherwise be paid for on the first request: the

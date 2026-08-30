@@ -43,6 +43,9 @@ class Apps(private val context: Context) {
         return apps
     }
 
+    /** Everything the launcher shows, for diagnostics. */
+    fun all(): List<AppMatch> = launchable()
+
     /** Best match for a spoken app name, or null when nothing is close enough. */
     fun find(query: String): AppMatch? {
         val needle = query.lowercase().trim().removeSuffix(" app").trim()
