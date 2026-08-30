@@ -5,7 +5,5 @@ import android.service.voice.VoiceInteractionSession
 import android.service.voice.VoiceInteractionSessionService
 
 class SentrySessionService : VoiceInteractionSessionService() {
-    override fun onNewSession(args: Bundle?): VoiceInteractionSession {
-        return SentrySession(this)
-    }
+    override fun onNewSession(args: Bundle?): VoiceInteractionSession = SentrySession(this)
 }
