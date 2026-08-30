@@ -13,6 +13,7 @@ import com.sentry.nlu.Planner
 import com.sentry.skills.Apps
 import com.sentry.skills.Contacts
 import com.sentry.skills.Skills
+import com.sentry.skills.Watchers
 import com.sentry.voice.Speaker
 import com.sentry.voice.VoiceEngine
 import kotlinx.coroutines.CoroutineScope
@@ -63,9 +64,9 @@ class Container(context: Context) {
 
     private val contacts = Contacts(appContext)
 
-    /** Exposed for the debug test harness. */
+    /** One index, shared: [Watchers] invalidates it and every lookup sees that. */
     val appsIndex = Apps(appContext)
-    private val skills = Skills(appContext, memory)
+    private val skills = Skills(appContext, memory, appsIndex)
     private val planner = Planner(brains)
 
     val agent = Agent(skills, planner, brains, speaker, phrases, memory)
@@ -77,10 +78,14 @@ class Container(context: Context) {
      * This is the difference between "Sentry" being answered instantly and being
      * answered after a two second stall on the very first use of the day.
      */
+    private val watchers = Watchers(appContext, appsIndex) { refreshBias() }
+
     fun start() {
         scope.launch { voice.prepare() }
         scope.launch { brains.warmUp() }
         scope.launch { refreshBias() }
+        // A contact saved a minute ago should be callable now, not after a restart.
+        watchers.start()
     }
 
     /**
@@ -129,6 +134,7 @@ class Container(context: Context) {
     }
 
     fun shutdown() {
+        watchers.stop()
         voice.close()
         speaker.close()
         brains.close()

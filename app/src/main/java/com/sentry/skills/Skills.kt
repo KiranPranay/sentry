@@ -49,6 +49,12 @@ import java.util.Locale
 class Skills(
     private val context: Context,
     private val memory: Memory,
+    /**
+     * Shared with the rest of the app on purpose: [Watchers] invalidates this when
+     * something is installed, and a private copy here would keep serving the stale
+     * list it captured at startup.
+     */
+    private val apps: Apps,
 ) {
 
     private companion object {
@@ -65,7 +71,6 @@ class Skills(
     }
 
     private val contacts = Contacts(context)
-    private val apps = Apps(context)
 
     /** What was last offered as a numbered list, so "the second one" can resolve. */
     private var pendingChoices: List<ContactMatch> = emptyList()
@@ -191,17 +196,36 @@ class Skills(
      * some point, that is exactly the missing link — so kinship words resolve through
      * memory before the contact search sees them.
      */
-    private fun resolveRelation(query: String): String {
-        val fact = when (query.trim().lowercase()) {
-            "mom", "mum", "mother", "amma", "mummy", "ma" -> Fact.MOTHER
-            "dad", "father", "daddy", "papa", "nanna", "appa" -> Fact.FATHER
-            "wife", "husband", "partner" -> Fact.SPOUSE
-            "brother", "sister", "sibling" -> Fact.SIBLING
-            else -> return query
+    private fun relationFact(query: String): Fact? = when (query.trim().lowercase()) {
+        "mom", "mum", "mother", "amma", "mummy", "ma" -> Fact.MOTHER
+        "dad", "father", "daddy", "papa", "nanna", "appa" -> Fact.FATHER
+        "wife", "husband", "partner" -> Fact.SPOUSE
+        "brother", "sister", "sibling" -> Fact.SIBLING
+        else -> null
+    }
+
+    /**
+     * Contacts matching a spoken name, resolving relationships through memory.
+     *
+     * "Call mom" is not a name and no fuzzy matching will make it one — but if Sentry
+     * has been told who mom is, that is the missing link. The remembered name is tried
+     * first and the spoken word second, because the two can disagree: someone whose
+     * mother is Rani may still have her saved in the phone as "Maa", and refusing to
+     * fall back would make remembering a fact *worse* than not knowing it.
+     */
+    private fun findPerson(query: String): List<ContactMatch> {
+        val candidates = buildList {
+            relationFact(query)?.let { fact -> memory[fact]?.let { add(it) } }
+            add(query)
         }
-        val known = memory[fact] ?: return query
-        Log.d(TAG, "\"$query\" -> \"$known\" (remembered)")
-        return known
+        for (candidate in candidates) {
+            val found = contacts.find(candidate)
+            if (found.isNotEmpty()) {
+                if (candidate != query) Log.d(TAG, "\"$query\" -> \"$candidate\" (remembered)")
+                return found
+            }
+        }
+        return emptyList()
     }
 
     private fun call(query: String): Reply {
@@ -209,7 +233,7 @@ class Skills(
             return needsPermission("I need permission to see your contacts and place calls.")
         }
 
-        val matches = contacts.find(resolveRelation(query))
+        val matches = findPerson(query)
         return when {
             matches.isEmpty() -> Reply("I couldn't find anyone called $query.")
             matches.size == 1 -> placeCall(matches[0].number, matches[0].name)
@@ -217,10 +241,26 @@ class Skills(
                 pendingChoices = matches
                 pendingAction = { placeCall(it.number, it.name) }
                 Reply.ask(
-                    "I found ${matches.size} matches. Which one?",
-                    matches.map { it.name },
+                    question(matches),
+                    matches.map { it.spoken },
                 )
             }
+        }
+    }
+
+    /**
+     * The right question depends on what is ambiguous.
+     *
+     * Several people called Kumar is a different question from one person with a
+     * mobile and a landline, and asking "which one?" for both leaves the user
+     * guessing what is being asked.
+     */
+    private fun question(matches: List<ContactMatch>): String {
+        val oneName = matches.map { it.name.lowercase() }.distinct().size == 1
+        return if (oneName) {
+            "${matches[0].name} has ${matches.size} numbers. Which one?"
+        } else {
+            "I found ${matches.size} matches. Which one?"
         }
     }
 
@@ -265,18 +305,14 @@ class Skills(
         if (!contacts.hasPermission()) {
             return needsPermission("I need permission to see your contacts.")
         }
-        val who = resolveRelation(command.query)
-        val matches = contacts.find(who)
+        val matches = findPerson(command.query)
         return when {
-            matches.isEmpty() -> Reply("I couldn't find anyone called $who.")
+            matches.isEmpty() -> Reply("I couldn't find anyone called ${command.query}.")
             matches.size == 1 -> compose(matches[0], command.body, command.channel)
             else -> {
                 pendingChoices = matches
                 pendingAction = { compose(it, command.body, command.channel) }
-                Reply.ask(
-                    "I found ${matches.size} matches. Which one?",
-                    matches.map { it.name },
-                )
+                Reply.ask(question(matches), matches.map { it.spoken })
             }
         }
     }
@@ -650,10 +686,7 @@ class Skills(
         }
         val position = if (index == -1) choices.lastIndex else index - 1
         if (position !in choices.indices) {
-            return Reply.ask(
-                "That wasn't on the list. Which one?",
-                choices.map { it.name },
-            )
+            return Reply.ask("That wasn't on the list. Which one?", choices.map { it.spoken })
         }
         pendingChoices = emptyList()
         pendingAction = null

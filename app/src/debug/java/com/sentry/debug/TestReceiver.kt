@@ -8,6 +8,7 @@ import com.sentry.sentry
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -31,6 +32,7 @@ class TestReceiver : BroadcastReceiver() {
         const val ACTION_SAY = "com.sentry.debug.SAY"
         const val ACTION_DUMP = "com.sentry.debug.DUMP"
         const val ACTION_LOOKUP = "com.sentry.debug.LOOKUP"
+        const val ACTION_SPLIT = "com.sentry.debug.SPLIT"
         const val ACTION_APPS = "com.sentry.debug.APPS"
 
         /** Long enough for a conversational answer from a small model. */
@@ -58,6 +60,23 @@ class TestReceiver : BroadcastReceiver() {
                     }
                     val reply = container.agent.transcript.value.lastOrNull()
                     Log.i(TAG, "<-- \"${reply?.text.orEmpty()}\" (${took ?: -1}ms)")
+                }
+            }
+
+            ACTION_SPLIT -> {
+                // Two fragments with a controlled gap, which is what the recogniser
+                // produces when it endpoints mid-sentence. Driving this from adb is
+                // not reliable — two round trips take longer than the continuation
+                // window — so the gap is applied in-process.
+                val first = intent.getStringExtra("first").orEmpty()
+                val second = intent.getStringExtra("second").orEmpty()
+                val gap = intent.getIntExtra("gap", 150).toLong()
+                Log.i(TAG, "--> \"$first\" +${gap}ms \"$second\"")
+                scope.launch {
+                    launch { container.agent.handle(first) }
+                    delay(gap)
+                    container.agent.handle(second)
+                    Log.i(TAG, "<-- \"${container.agent.transcript.value.lastOrNull()?.text.orEmpty()}\"")
                 }
             }
 

@@ -122,6 +122,7 @@ private fun HomeScreen(
     }
     val learnedCount = remember(refresh) { container.phrases.all().size }
     val enrolledVoice = remember(refresh) { container.voiceProfile.sampleCount }
+    val knownFacts = remember(refresh) { container.memory.all().size }
     val taraInstalled = remember(refresh) { TaraCore.isInstalled(context) }
     val isDefaultAssistant = remember(refresh) { context.isDefaultAssistant() }
     val canScheduleAlarms = remember(refresh) { context.canScheduleExactAlarms() }
@@ -330,6 +331,32 @@ private fun HomeScreen(
                     } else {
                         "Read five sentences so Sentry can tell your voice from " +
                             "someone else's — and optionally ignore everyone else."
+                    },
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+
+        Spacer(Modifier.height(10.dp))
+
+        Surface(
+            shape = RoundedCornerShape(16.dp),
+            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { context.startActivity(Intent(context, MemoryActivity::class.java)) },
+        ) {
+            Column(Modifier.padding(16.dp)) {
+                Text("What Sentry knows", fontWeight = FontWeight.Medium)
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    if (knownFacts > 0) {
+                        "$knownFacts things picked up while you were talking. Tap to " +
+                            "see, correct or forget them."
+                    } else {
+                        "Nothing yet. Mention your name, family or blood group in " +
+                            "conversation and it will be remembered here."
                     },
                     style = MaterialTheme.typography.bodyLarge,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,

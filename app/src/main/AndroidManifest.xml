@@ -79,6 +79,14 @@
             </intent-filter>
         </activity>
 
+        <!-- Everything Sentry has learned about the user. -->
+        <activity
+            android:name=".ui.MemoryActivity"
+            android:exported="false"
+            android:label="What Sentry knows"
+            android:parentActivityName=".ui.HomeActivity"
+            android:theme="@style/Theme.Sentry" />
+
         <!-- Teaching Sentry your voice, so it can tell you from someone else. -->
         <activity
             android:name=".ui.EnrollActivity"

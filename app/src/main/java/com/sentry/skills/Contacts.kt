@@ -6,7 +6,14 @@ import android.content.pm.PackageManager
 import android.provider.ContactsContract
 import androidx.core.content.ContextCompat
 
-data class ContactMatch(val name: String, val number: String)
+/**
+ * @param label how to describe this number when several belong to one person —
+ *   "Mobile", "Home". Blank when the person has only one.
+ */
+data class ContactMatch(val name: String, val number: String, val label: String = "") {
+    /** What to read out when offering a choice. */
+    val spoken: String get() = if (label.isBlank()) name else "$name, $label"
+}
 
 /** Contacts to bias recognition towards. Beyond this the grammar costs more than it gives. */
 private const val MAX_BIAS_NAMES = 80
@@ -37,10 +44,23 @@ class Contacts(private val context: Context) {
         val rows = queryContacts(query)
         if (rows.isEmpty()) return emptyList()
 
+        // One row per person for ranking. Which of their numbers to use is a
+        // separate question, answered below only if it turns out to matter.
         val byName = rows.groupBy { it.name.lowercase() }
             .map { (_, group) -> group.first() }
 
-        return ContactRanker.rank(byName, query)
+        val ranked = ContactRanker.rank(byName, query)
+
+        // A single person with several numbers is still a choice the user has to
+        // make. Collapsing to the first — which is what this did — silently dialled
+        // whichever number the address book happened to return first.
+        if (ranked.size == 1) {
+            val numbers = rows
+                .filter { it.name.equals(ranked[0].name, ignoreCase = true) }
+                .distinctBy { it.number.filter(Char::isDigit) }
+            if (numbers.size > 1) return numbers
+        }
+        return ranked
     }
 
     /**
@@ -91,6 +111,8 @@ class Contacts(private val context: Context) {
         val projection = arrayOf(
             ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
             ContactsContract.CommonDataKinds.Phone.NUMBER,
+            ContactsContract.CommonDataKinds.Phone.TYPE,
+            ContactsContract.CommonDataKinds.Phone.LABEL,
         )
 
         // Match on any word of the query, so "call john smith" still finds "John"
@@ -116,11 +138,26 @@ class Contacts(private val context: Context) {
                 val numberColumn = cursor.getColumnIndex(
                     ContactsContract.CommonDataKinds.Phone.NUMBER
                 )
+                val typeColumn = cursor.getColumnIndex(
+                    ContactsContract.CommonDataKinds.Phone.TYPE
+                )
+                val labelColumn = cursor.getColumnIndex(
+                    ContactsContract.CommonDataKinds.Phone.LABEL
+                )
                 if (nameColumn < 0 || numberColumn < 0) return@use
                 while (cursor.moveToNext()) {
                     val name = cursor.getString(nameColumn) ?: continue
                     val number = cursor.getString(numberColumn) ?: continue
-                    matches.add(ContactMatch(name, number))
+                    val label = if (typeColumn >= 0) {
+                        ContactsContract.CommonDataKinds.Phone.getTypeLabel(
+                            context.resources,
+                            cursor.getInt(typeColumn),
+                            if (labelColumn >= 0) cursor.getString(labelColumn) else null,
+                        ).toString()
+                    } else {
+                        ""
+                    }
+                    matches.add(ContactMatch(name, number, label))
                 }
             }
         }

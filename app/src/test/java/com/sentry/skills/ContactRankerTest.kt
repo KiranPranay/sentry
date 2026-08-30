@@ -78,6 +78,13 @@ class ContactRankerTest {
     }
 
     @Test
+    fun `a number label is spoken only when it disambiguates`() {
+        // "Maa" alone reads better than "Maa, Mobile" when there is only one number.
+        assertEquals("Maa", ContactMatch("Maa", "+919030004575").spoken)
+        assertEquals("Maa, Mobile", ContactMatch("Maa", "+919030004575", "Mobile").spoken)
+    }
+
+    @Test
     fun `nothing relevant returns nothing`() {
         assertTrue(ContactRanker.rank(contacts("Ravi", "Priya"), "zebediah").isEmpty())
     }
