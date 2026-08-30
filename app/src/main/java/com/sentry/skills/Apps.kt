@@ -66,7 +66,16 @@ class Apps(private val context: Context) {
 
         // Finally, a package name match, which catches "open com.foo" and the times
         // the label bears no relation to what the user calls the app.
-        return apps.firstOrNull { it.packageName.lowercase().contains(needle.replace(" ", "")) }
+        //
+        // Both sides are stripped of punctuation, not just the query. This phone runs
+        // a YouTube Music fork labelled "YT Music" — no spelling of "youtube music"
+        // matches that label — and its package, "anddea.youtube.music", failed too
+        // because the dots were only removed from one side of the comparison.
+        val squashed = needle.filter(Char::isLetterOrDigit)
+        if (squashed.isEmpty()) return null
+        return apps.firstOrNull { app ->
+            app.packageName.lowercase().filter(Char::isLetterOrDigit).contains(squashed)
+        }
     }
 
     fun launchIntent(packageName: String): Intent? =
