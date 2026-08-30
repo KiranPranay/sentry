@@ -3,6 +3,7 @@ package com.sentry.debug
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.media.AudioManager
 import android.util.Log
 import com.sentry.nlu.FastMatcher
 import com.sentry.sentry
@@ -38,6 +39,7 @@ class TestReceiver : BroadcastReceiver() {
         const val ACTION_WHO = "com.sentry.debug.WHO"
         const val ACTION_REACH = "com.sentry.debug.REACH"
         const val ACTION_PLAN = "com.sentry.debug.PLAN"
+        const val ACTION_STREAM = "com.sentry.debug.STREAM"
 
         /** Long enough for a conversational answer from a small model. */
         const val TURN_TIMEOUT_MS = 90_000L
@@ -96,6 +98,23 @@ class TestReceiver : BroadcastReceiver() {
                     .filter { filter.isBlank() || it.label.lowercase().contains(filter) ||
                         it.packageName.lowercase().contains(filter) }
                     .forEach { Log.i(TAG, "  app: ${it.label}  [${it.packageName}]") }
+            }
+
+            ACTION_STREAM -> {
+                // Putting a stream back where it was found. The shell's volume
+                // commands report success on this device and change nothing, and the
+                // volume keys play a sample of the stream at its new level — which is
+                // the one thing that must not happen while someone is asleep.
+                // setStreamVolume with no flags makes no sound and shows no UI.
+                val stream = intent.getIntExtra("stream", -1)
+                val level = intent.getIntExtra("level", -1)
+                val audio = context.getSystemService(AudioManager::class.java)
+                if (stream < 0 || level < 0 || audio == null) {
+                    Log.w(TAG, "stream: need --ei stream N --ei level N")
+                } else {
+                    audio.setStreamVolume(stream, level, 0)
+                    Log.i(TAG, "stream $stream now ${audio.getStreamVolume(stream)}")
+                }
             }
 
             ACTION_PLAN -> {
