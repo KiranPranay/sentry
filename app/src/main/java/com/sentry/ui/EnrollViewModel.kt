@@ -196,8 +196,16 @@ class EnrollViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun release() {
-        voice.stop()
-        if (container.prefs.hotwordEnabled) HotwordService.start(getApplication())
+        // Deliberately no voice.stop() before handing back. Starting the hotword
+        // service goes through the engine's own serialised restart, which cancels
+        // this screen's capture and brings up the wake-word one as a single
+        // operation. Stopping separately raced that restart and won, leaving the
+        // wake word dead after every visit to this screen.
+        if (container.prefs.hotwordEnabled) {
+            HotwordService.start(getApplication())
+        } else {
+            voice.stop()
+        }
     }
 
     override fun onCleared() {
