@@ -17,6 +17,16 @@ sealed interface Command {
     data object ShowAlarms : Command
     data object ShowTimers : Command
 
+    /**
+     * Stop what is counting down.
+     *
+     * Separate from [ShowTimers] because "cancel the timer" is the one thing people
+     * say to a timer more often than they say anything else, and sending them to a
+     * list of timers to tap one themselves is not an answer.
+     */
+    data object CancelTimer : Command
+    data object CancelAlarm : Command
+
     // ---------------------------------------------------------------- comms
 
     /** Call someone by name; the contact still has to be resolved and may be ambiguous. */
@@ -40,6 +50,7 @@ sealed interface Command {
 
     data class Torch(val on: Boolean) : Command
     data class Volume(val change: VolumeChange) : Command
+    data class Brightness(val change: LevelChange) : Command
     data class Dnd(val on: Boolean) : Command
     data object OpenCamera : Command
     data object BatteryStatus : Command
@@ -109,6 +120,21 @@ enum class Channel(val label: String, val packageName: String?) {
     WHATSAPP("WhatsApp", "com.whatsapp"),
 }
 
+/**
+ * How far to move something that has a level.
+ *
+ * Shared by brightness and anything else that turns out to work the same way. Volume
+ * keeps its own type because it has a state the others do not — muted is not the same
+ * as zero, and a screen cannot be muted.
+ */
+sealed interface LevelChange {
+    data object Up : LevelChange
+    data object Down : LevelChange
+    data object Max : LevelChange
+    data object Min : LevelChange
+    data class Percent(val value: Int) : LevelChange
+}
+
 sealed interface VolumeChange {
     data object Up : VolumeChange
     data object Down : VolumeChange
@@ -164,6 +190,12 @@ val Command.commit: Commit
         is Command.OpenPanel, is Command.ShowAlarms, is Command.ShowTimers ->
             Commit.IDEMPOTENT
 
+        is Command.Brightness -> when (change) {
+            is LevelChange.Up, is LevelChange.Down -> Commit.RELATIVE
+            is LevelChange.Max, is LevelChange.Min, is LevelChange.Percent ->
+                Commit.IDEMPOTENT
+        }
+
         is Command.Volume -> when (change) {
             is VolumeChange.Up, is VolumeChange.Down -> Commit.RELATIVE
             is VolumeChange.Mute, is VolumeChange.Max, is VolumeChange.Percent ->
@@ -180,6 +212,10 @@ val Command.commit: Commit
         is Command.HangUp, is Command.SendMessage, is Command.SetAlarm,
         is Command.SetTimer, is Command.Search, is Command.Navigate,
         is Command.PlayMusic -> Commit.IRREVERSIBLE
+
+        // Repeating them is harmless, but a countdown that has been thrown away
+        // cannot be got back, so they wait out the stitching window like the rest.
+        is Command.CancelTimer, is Command.CancelAlarm -> Commit.IRREVERSIBLE
 
         // Not destructive in themselves, but both consume one-way state: Choose eats
         // the pending disambiguation list, and Stop ends the session for good.

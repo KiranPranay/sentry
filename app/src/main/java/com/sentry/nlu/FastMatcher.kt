@@ -5,6 +5,7 @@ import com.sentry.core.Command
 import com.sentry.core.MediaAction
 import com.sentry.core.Panel
 import com.sentry.core.Provider
+import com.sentry.core.LevelChange
 import com.sentry.core.VolumeChange
 
 /**
@@ -66,6 +67,7 @@ object FastMatcher {
             ?: matchMediaControl(s)
             ?: matchMusic(s)
             ?: matchVolume(s)
+            ?: matchBrightness(s)
             ?: matchDnd(s)
             ?: matchCall(s)
             ?: matchMessage(s)
@@ -138,6 +140,15 @@ object FastMatcher {
      * longer than "show my alarms" — fell through to the language model and came back
      * as conversation. A fixed phrase list is a phrasebook, not an understanding.
      */
+    private val CANCEL_TIMER = Regex(
+        """^(?:cancel|stop|delete|dismiss|turn off|kill|end)\s+(?:the |my |that )?timers?$""" +
+            """|^timer off$"""
+    )
+    private val CANCEL_ALARM = Regex(
+        """^(?:cancel|stop|delete|dismiss|turn off|kill|snooze off)\s+(?:the |my |that )?alarms?$""" +
+            """|^alarm off$"""
+    )
+
     private val SHOW_TIMERS = Regex(
         """^(?:show|list|see|check|open|what|what are)?\s*(?:me )?(?:my |the )?timers?""" +
             """(?: do i have| are (?:there|running|set)| i have)?$"""
@@ -148,6 +159,7 @@ object FastMatcher {
     )
 
     private fun matchTimer(s: String): Command? {
+        if (CANCEL_TIMER.matches(s)) return Command.CancelTimer
         if (SHOW_TIMERS.matches(s)) return Command.ShowTimers
         TIMER.find(s)?.let { m ->
             val rest = m.groupValues[1].ifBlank { m.groupValues[2] }
@@ -173,6 +185,7 @@ object FastMatcher {
     private val WAKE_ME = Regex("""^wake me(?: up)?(?: at| for| by)?\s+(.+)$""")
 
     private fun matchAlarm(s: String): Command? {
+        if (CANCEL_ALARM.matches(s)) return Command.CancelAlarm
         if (SHOW_ALARMS.matches(s)) return Command.ShowAlarms
         // A duration phrase means a timer even when the speaker said "alarm".
         val body = ALARM.find(s)?.groupValues?.get(1) ?: WAKE_ME.find(s)?.groupValues?.get(1)
@@ -307,6 +320,49 @@ object FastMatcher {
     private val MAX_VOLUME = Regex(
         """^(?:max|maximum|full|highest|loudest) volume$|^volume (?:max|maximum)$|^loudest$"""
     )
+
+    private val SET_BRIGHTNESS = Regex(
+        """^(?:set |change |put )?(?:the )?(?:screen )?brightness(?: level)?(?: to| at)?\s+(.+?)%?$"""
+    )
+    private const val SCREEN = """(?:it|the (?:brightness|screen|display))"""
+
+    private val BRIGHTER = Regex(
+        """^brightness up$|^(?:make )?(?:it )?brighter$|^a (?:bit|little) brighter$""" +
+            """|^(?:turn|bump) up $SCREEN$|^(?:turn|bump) $SCREEN up$""" +
+            """|^(?:increase|raise)(?: the)? (?:brightness|screen brightness)$""" +
+            """|^brighten(?: $SCREEN)?$"""
+    )
+    private val DIMMER = Regex(
+        """^brightness down$|^(?:make )?(?:it )?dimmer$|^a (?:bit|little) dimmer$""" +
+            """|^(?:turn|bring) down $SCREEN$|^(?:turn|bring) $SCREEN down$""" +
+            """|^(?:decrease|lower|reduce)(?: the)? (?:brightness|screen brightness)$""" +
+            """|^dim(?: $SCREEN)?$"""
+    )
+    private val MAX_BRIGHTNESS = Regex(
+        """^(?:max|maximum|full|highest|brightest)(?: brightness)?$|^brightness (?:max|maximum)$"""
+    )
+    private val MIN_BRIGHTNESS = Regex(
+        """^(?:min|minimum|lowest|dimmest)(?: brightness)?$|^brightness (?:min|minimum)$"""
+    )
+
+    private fun matchBrightness(s: String): Command? {
+        if (!s.contains("bright") && !s.contains("dim") && !s.contains("screen") &&
+            !s.contains("display")
+        ) {
+            return null
+        }
+        SET_BRIGHTNESS.find(s)?.let { m ->
+            val pct = Arithmetic.number(m.groupValues[1])?.toInt()
+            if (pct != null && pct in 0..100) return Command.Brightness(LevelChange.Percent(pct))
+        }
+        return when {
+            MAX_BRIGHTNESS.matches(s) -> Command.Brightness(LevelChange.Max)
+            MIN_BRIGHTNESS.matches(s) -> Command.Brightness(LevelChange.Min)
+            BRIGHTER.matches(s) -> Command.Brightness(LevelChange.Up)
+            DIMMER.matches(s) -> Command.Brightness(LevelChange.Down)
+            else -> null
+        }
+    }
 
     private fun matchVolume(s: String): Command? {
         SET_VOLUME.find(s)?.let { m ->

@@ -1,6 +1,7 @@
 package com.sentry.nlu
 
 import com.sentry.core.Command
+import com.sentry.core.LevelChange
 import com.sentry.core.VolumeChange
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -103,5 +104,56 @@ class PhrasingTest {
     fun `a bare number is still not a sum`() {
         assertNull(match("seven"))
         assertNull(match("42"))
+    }
+
+    @Test
+    fun `cancelling a timer or an alarm`() {
+        listOf("cancel the timer", "stop the timer", "cancel timer", "delete the timer",
+            "turn off the timer", "dismiss the timer", "stop my timer")
+            .forEach { assertEquals(it, Command.CancelTimer, match(it)) }
+
+        listOf("cancel the alarm", "stop the alarm", "turn off the alarm",
+            "dismiss the alarm", "delete my alarm")
+            .forEach { assertEquals(it, Command.CancelAlarm, match(it)) }
+    }
+
+    @Test
+    fun `cancelling is not the same as setting or listing`() {
+        assertEquals(Command.ShowTimers, match("show my timers"))
+        assertEquals(Command.ShowAlarms, match("show my alarms"))
+        // "Stop" on its own still ends the conversation rather than a countdown.
+        assertEquals(Command.Stop, match("stop"))
+    }
+
+    @Test
+    fun `changing the screen brightness`() {
+        listOf("increase the brightness", "brightness up", "brighter", "make it brighter",
+            "turn up the brightness", "brighten the screen", "raise the brightness")
+            .forEach { assertEquals(it, Command.Brightness(LevelChange.Up), match(it)) }
+
+        listOf("decrease the brightness", "brightness down", "dimmer", "dim the screen",
+            "lower the brightness", "turn down the brightness")
+            .forEach { assertEquals(it, Command.Brightness(LevelChange.Down), match(it)) }
+
+        assertEquals(Command.Brightness(LevelChange.Max), match("max brightness"))
+        assertEquals(Command.Brightness(LevelChange.Min), match("minimum brightness"))
+        assertEquals(
+            Command.Brightness(LevelChange.Percent(30)),
+            match("set the brightness to 30"),
+        )
+        assertEquals(
+            Command.Brightness(LevelChange.Percent(50)),
+            match("set brightness to fifty"),
+        )
+    }
+
+    @Test
+    fun `brightness and volume do not shadow each other`() {
+        // Both end in "up" and "down" and both accept a bare number, so the words
+        // that distinguish them have to actually be required.
+        assertEquals(Command.Volume(VolumeChange.Up), match("turn it up"))
+        assertEquals(Command.Brightness(LevelChange.Up), match("turn the screen up"))
+        assertEquals(Command.Volume(VolumeChange.Percent(30)), match("set the volume to 30"))
+        assertEquals(Command.Brightness(LevelChange.Percent(30)), match("set the brightness to 30"))
     }
 }

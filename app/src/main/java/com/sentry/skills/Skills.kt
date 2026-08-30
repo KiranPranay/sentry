@@ -35,6 +35,7 @@ import com.sentry.data.Memory
 import com.sentry.data.NameBook
 import com.sentry.core.Reply
 import com.sentry.service.ScreenshotService
+import com.sentry.core.LevelChange
 import com.sentry.core.VolumeChange
 import java.text.SimpleDateFormat
 import java.util.Calendar
@@ -77,6 +78,10 @@ class Skills(
 
         /** A spoken list longer than this stops being a question and becomes a recitation. */
         const val MAX_CHOICES = 5
+
+        /** The scale Android stores screen brightness on. */
+        const val BRIGHTNESS_MAX = 255
+        const val BRIGHTNESS_STEP = 40
 
         /** People Sentry may have been told about, in the order it should guess them. */
         val FAMILY = listOf(Fact.MOTHER, Fact.FATHER, Fact.SPOUSE, Fact.SIBLING)
@@ -132,6 +137,8 @@ class Skills(
         is Command.SetTimer -> setTimer(command)
         Command.ShowAlarms -> showClock(AlarmClock.ACTION_SHOW_ALARMS, "alarms")
         Command.ShowTimers -> showClock(AlarmClock.ACTION_SHOW_TIMERS, "timers")
+        Command.CancelTimer -> dismissClock(AlarmClock.ACTION_DISMISS_TIMER, "timer")
+        Command.CancelAlarm -> dismissClock(AlarmClock.ACTION_DISMISS_ALARM, "alarm")
 
         is Command.Call -> call(command.query)
         is Command.CallNumber -> placeCall(command.number, command.number)
@@ -144,6 +151,7 @@ class Skills(
 
         is Command.Torch -> torch(command.on)
         is Command.Volume -> volume(command.change)
+        is Command.Brightness -> brightness(command.change)
         is Command.Dnd -> dnd(command.on)
         Command.OpenCamera -> openCamera()
         Command.BatteryStatus -> battery()
@@ -219,6 +227,28 @@ class Skills(
         if (!canResolve(intent)) return Reply.error("There's no clock app on this phone.")
         context.startActivity(preferSystemHandler(intent))
         return Reply("Here are your $what.", Chip(ChipIcon.ALARM, what.replaceFirstChar { it.uppercase() }))
+    }
+
+    /**
+     * Stop a running timer or a ringing alarm.
+     *
+     * Sent without a search extra, which asks the clock app to deal with whatever is
+     * currently going: that is what "cancel the timer" means when there is one timer,
+     * and when there are several it puts the choice where the user can see them.
+     *
+     * [Intent.FLAG_ACTIVITY_NO_ANIMATION] because dismissing something is not worth a
+     * screen transition — on a phone with one timer running nothing needs to be shown
+     * at all.
+     */
+    private fun dismissClock(action: String, what: String): Reply {
+        val intent = Intent(action)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION)
+        if (!canResolve(intent)) return Reply.error("There's no clock app on this phone.")
+        context.startActivity(preferSystemHandler(intent))
+        return Reply(
+            "Cancelled the $what.",
+            Chip(ChipIcon.ALARM, what.replaceFirstChar { it.uppercase() }),
+        )
     }
 
     // ---------------------------------------------------------------- comms
@@ -642,6 +672,55 @@ class Skills(
             if (on) "Torch on." else "Torch off.",
             Chip(ChipIcon.TORCH, if (on) "On" else "Off"),
         )
+    }
+
+    /**
+     * Screen brightness.
+     *
+     * Needs WRITE_SETTINGS, which is not a runtime permission but a page in Settings
+     * the user has to visit — so the failure is handled the same way DND is: say what
+     * is needed and put them on the page, rather than reporting that it did not work.
+     *
+     * Writes to the system setting rather than the window attribute. A window
+     * brightness override only dims Sentry's own screen, which is a convincing
+     * imitation of working right up until the user leaves the app.
+     */
+    private fun brightness(change: LevelChange): Reply {
+        if (!Settings.System.canWrite(context)) {
+            return needsSetting(
+                "I need permission to change the brightness.",
+                Settings.ACTION_MANAGE_WRITE_SETTINGS,
+            )
+        }
+
+        val resolver = context.contentResolver
+        val current = runCatching {
+            Settings.System.getInt(resolver, Settings.System.SCREEN_BRIGHTNESS)
+        }.getOrDefault(BRIGHTNESS_MAX / 2)
+
+        val target = when (change) {
+            LevelChange.Up -> current + BRIGHTNESS_STEP
+            LevelChange.Down -> current - BRIGHTNESS_STEP
+            LevelChange.Max -> BRIGHTNESS_MAX
+            // Never all the way off: a black screen looks exactly like a broken phone,
+            // and the way back is a setting the user now cannot see to change.
+            LevelChange.Min -> BRIGHTNESS_STEP
+            is LevelChange.Percent -> BRIGHTNESS_MAX * change.value / 100
+        }.coerceIn(1, BRIGHTNESS_MAX)
+
+        // Automatic brightness would undo this within seconds, which reads as the
+        // command having been ignored.
+        runCatching {
+            Settings.System.putInt(
+                resolver,
+                Settings.System.SCREEN_BRIGHTNESS_MODE,
+                Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL,
+            )
+        }
+        Settings.System.putInt(resolver, Settings.System.SCREEN_BRIGHTNESS, target)
+
+        val percent = target * 100 / BRIGHTNESS_MAX
+        return Reply("Brightness $percent percent.", Chip(ChipIcon.SETTINGS, "$percent%"))
     }
 
     private fun volume(change: VolumeChange): Reply {

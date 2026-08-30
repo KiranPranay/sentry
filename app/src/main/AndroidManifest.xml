@@ -21,6 +21,12 @@
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
 
     <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
+
+    <!--
+        Screen brightness. Not a runtime permission: the user grants it on a page in
+        Settings, and Sentry sends them there the first time it is asked to dim.
+    -->
+    <uses-permission android:name="android.permission.WRITE_SETTINGS" />
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
 
