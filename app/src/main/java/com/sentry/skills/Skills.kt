@@ -476,6 +476,14 @@ class Skills(
         if (!canResolve(intent)) {
             return Reply.error("There's no ${channel.label} app that can do that.")
         }
+        if (reachOthers.blocked) {
+            // Nothing is sent by opening a composer, but opening a chat still marks
+            // it read, and a read receipt at three in the morning is a message of
+            // its own.
+            Log.i(TAG, "would open ${channel.label} for ${match.name}: $intent")
+            return Reply("I would open ${channel.label} for ${match.name}, " +
+                "but reaching people is switched off.")
+        }
         context.startActivity(intent)
 
         // Still opens the composer rather than sending, on every channel. A misheard
