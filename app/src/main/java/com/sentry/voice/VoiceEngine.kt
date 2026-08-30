@@ -28,6 +28,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 import org.vosk.Model
 import org.vosk.Recognizer
@@ -81,6 +82,9 @@ class VoiceEngine(private val context: Context) {
         private const val HOTWORD_GRAMMAR = """["sentry", "[unk]"]"""
 
         private const val WAKE_WORD = "sentry"
+
+        /** Vosk's out-of-vocabulary token, allowed in every grammar. */
+        private const val UNKNOWN_TOKEN = "[unk]"
 
         /** Stop dictating after this much silence following speech. */
         private const val TRAILING_SILENCE_MS = 900L
@@ -250,6 +254,24 @@ class VoiceEngine(private val context: Context) {
      */
     @Volatile
     var spokenText: String? = null
+
+    /**
+     * Phrases to bias recognition towards — "call amma", "text ravi", and so on,
+     * built from the user's own contacts.
+     *
+     * This is the trick Apple describes for Siri: the general language model carries
+     * a placeholder where a contact name goes, and a per-user grammar is spliced in
+     * at decode time, cutting entity error roughly threefold in their published
+     * numbers. Vosk is the same shape of recogniser — acoustic model, lexicon, n-gram
+     * WFST — so the same idea applies directly, as a second decoder restricted to
+     * these phrases running beside the open-vocabulary one.
+     *
+     * It is consulted only when the free-form transcript turned out to be nothing
+     * Sentry could act on. A restricted decoder always returns its closest match, so
+     * letting it speak first would turn ordinary conversation into phone calls.
+     */
+    @Volatile
+    var biasPhrases: List<String> = emptyList()
 
     /**
      * Re-ranks competing transcriptions. Set by the app to "is this a command I
@@ -452,6 +474,18 @@ class VoiceEngine(private val context: Context) {
             return@withContext
         }
 
+        // A third decoder, restricted to the user's likely commands. Only built for
+        // dictation, and only when there is something to bias towards.
+        val biasList = biasPhrases
+        val biased = runCatching {
+            if (mode == Mode.COMMAND && biasList.isNotEmpty()) {
+                val grammar = JSONArray(biasList + UNKNOWN_TOKEN).toString()
+                Recognizer(currentModel, SAMPLE_RATE.toFloat(), grammar)
+            } else {
+                null
+            }
+        }.onFailure { Log.w(TAG, "could not build the biased decoder", it) }.getOrNull()
+
         // A second, tiny recogniser used only to hear the wake word over our own
         // voice. Costs almost nothing: its grammar has two entries.
         val barge = runCatching {
@@ -544,6 +578,7 @@ class VoiceEngine(private val context: Context) {
                 val decodeStart = System.nanoTime()
                 val complete = runCatching { recogniser.acceptWaveForm(chunk, read) }
                     .getOrDefault(false)
+                runCatching { biased?.acceptWaveForm(chunk, read) }
                 decodeNanos += System.nanoTime() - decodeStart
                 val chunkMs = read * 1000L / SAMPLE_RATE
                 audioNanos += chunkMs * 1_000_000L
@@ -628,8 +663,9 @@ class VoiceEngine(private val context: Context) {
                             recogniser.reset()
                             continue
                         }
-                        Log.d(TAG, "transcript (endpoint): \"$text\"")
-                        _events.tryEmit(Event.Transcript(text))
+                        val best = withBias(text, biased)
+                        Log.d(TAG, "transcript (endpoint): \"$best\"")
+                        _events.tryEmit(Event.Transcript(best))
                         return@withContext
                     }
                 } else {
@@ -652,8 +688,9 @@ class VoiceEngine(private val context: Context) {
                     val text = textOf(recogniser.finalResult).ifBlank { _partial.value }
                     _partial.value = ""
                     if (text.isNotBlank() && peak >= requiredPeak(spokeAt, now)) {
-                        Log.d(TAG, "transcript (silence): \"$text\"")
-                        _events.tryEmit(Event.Transcript(text))
+                        val best = withBias(text, biased)
+                        Log.d(TAG, "transcript (silence): \"$best\"")
+                        _events.tryEmit(Event.Transcript(best))
                     } else {
                         _events.tryEmit(Event.NoSpeech)
                     }
@@ -677,6 +714,7 @@ class VoiceEngine(private val context: Context) {
             runCatching { recorder.release() }
             runCatching { recogniser.close() }
             runCatching { barge?.close() }
+            runCatching { biased?.close() }
             _amplitude.value = 0f
             Log.d(TAG, "capture stopped")
         }
@@ -783,6 +821,28 @@ class VoiceEngine(private val context: Context) {
             current = swap
         }
         return previous[b.length]
+    }
+
+    /**
+     * Fall back to the biased decoder when the open-vocabulary one produced nothing
+     * actionable.
+     *
+     * The order matters and is the whole safety argument. A grammar-restricted
+     * decoder cannot say "I don't know" except through `[unk]`, so it will happily
+     * turn a remark about the weather into the nearest contact name. Asking it only
+     * after the open decoder has failed means the worst case is a wrong guess where
+     * we already had nothing.
+     */
+    private fun withBias(open: String, biased: Recognizer?): String {
+        if (biased == null) return open
+        val prefer = preferHypothesis ?: return open
+        if (prefer(open)) return open
+
+        val guess = runCatching { textOf(biased.finalResult) }.getOrDefault("")
+        if (guess.isBlank() || guess.contains(UNKNOWN_TOKEN) || !prefer(guess)) return open
+
+        Log.i(TAG, "biased decoder rescued \"$open\" -> \"$guess\"")
+        return guess
     }
 
     /**

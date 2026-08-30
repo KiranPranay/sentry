@@ -103,6 +103,69 @@ Two other guards keep an always-open microphone from talking to itself:
 
 ## Recognition
 
+### The wall: names are not in the lexicon
+
+Sentry kept hearing "call maa" as "karma". It is worth being precise about why,
+because it decides what can be done about it. Vosk logs which grammar words it can
+actually produce:
+
+```
+Ignoring word missing in vocabulary: 'maaaaaaa'
+Ignoring word missing in vocabulary: 'ananya'
+Ignoring word missing in vocabulary: 'akshitha'
+Ignoring word missing in vocabulary: 'chintu'
+```
+
+The recogniser has a fixed pronunciation lexicon and **cannot emit those strings at
+all**. "Karma" is simply the nearest thing it owns. No accent pack, no larger model
+and no fuzzy matching on the contact name fixes that — by the time the audio is
+transcribed the name is already gone, and so is the word "call" with it.
+
+Apple hits the same wall and solves it two ways: generating pronunciations for unknown
+names on the fly (needs a phone-level lexicon and a rebuilt decoding graph — not
+available here), and **mapping rare entity words onto phonetically similar frequent
+words the model already handles**, which is worth ~31% relative in their published
+numbers. The second is what Sentry does.
+
+### Teaching a phrase
+
+Say the phrase a few times in **Settings → Teach a phrase**. Sentry records what it
+actually heard and stores a rewrite, applied before anything else looks at the words:
+
+```
+PhraseBook: "voters" -> "what is the date" (learned)
+Agent:      heard: "what is the date"
+Agent:      reply: "It's Sunday, 30 August."
+```
+
+This is *not* retraining the recogniser, and the screen says so. Nor is it what "Ok
+Google" enrollment does — those phrases build a speaker embedding for wake-word
+verification, confirmed in Apple's equivalent write-up of "Hey Siri". It learns a
+consistent mistake so that the mistake stops mattering.
+
+Two guards, both added after watching them be needed. Every distinct variant is
+learned, not just repeated ones, because the mistake is stable in kind but not in
+detail — one phrase produced "voters", "voters", "don't compete" and later "eat".
+And a single very common word is refused: teaching "what is the date" produced "what"
+twice, and binding *that* would have turned every later sentence into a date query.
+
+### Biasing the decoder towards your contacts
+
+A second decoder runs beside the open-vocabulary one, restricted by grammar to
+commands built from starred contacts and anything taught. This is Siri's class-LM slot
+substitution — the general model carries a placeholder where a contact name goes, and
+a per-user grammar is spliced in at decode time.
+
+It is consulted **only when the open decoder produced nothing actionable**. A
+grammar-restricted decoder cannot say "I don't know" except through `[unk]`, so
+letting it speak first would turn remarks about the weather into phone calls.
+
+Taught phrases matter here twice over: a taught phrase is by construction something
+the recogniser *did* produce, so unlike a contact's real name it survives into the
+grammar intact.
+
+### Accent packs
+
 Two acoustic models ship, and the setup screen lets you pick:
 
 | Pack | For |

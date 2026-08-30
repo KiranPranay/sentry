@@ -79,6 +79,14 @@
             </intent-filter>
         </activity>
 
+        <!-- Teaching Sentry a phrase it keeps mishearing. -->
+        <activity
+            android:name=".ui.TeachActivity"
+            android:exported="false"
+            android:label="Teach a phrase"
+            android:parentActivityName=".ui.HomeActivity"
+            android:theme="@style/Theme.Sentry" />
+
         <!--
           The assistant surface itself. singleTask so a second wake word reuses the
           open session instead of stacking another copy behind it; the translucent

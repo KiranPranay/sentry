@@ -6,6 +6,7 @@ import com.sentry.brain.Brains
 import com.sentry.brain.Msg
 import com.sentry.brain.NoBrainException
 import com.sentry.brain.Role
+import com.sentry.data.PhraseBook
 import com.sentry.nlu.ChatPrompt
 import com.sentry.nlu.FastMatcher
 import com.sentry.nlu.Planner
@@ -39,6 +40,7 @@ class Agent(
     private val planner: Planner,
     private val brains: Brains,
     private val speaker: Speaker,
+    private val phrases: PhraseBook,
 ) {
 
     private companion object {
@@ -113,7 +115,10 @@ class Agent(
      * Handle one utterance, start to finish: understand it, do it, say the answer.
      */
     suspend fun handle(utterance: String) {
-        val text = utterance.trim()
+        // Anything the user has taught Sentry is translated first, so a phrase the
+        // recogniser reliably mangles arrives here as what they meant. Everything
+        // downstream then treats it exactly like a phrase that was heard correctly.
+        val text = phrases.translate(utterance.trim()).trim()
         if (text.isEmpty()) return
 
         // "Sentry" on its own is someone getting our attention, not a request. Say

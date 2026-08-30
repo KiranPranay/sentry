@@ -120,6 +120,7 @@ private fun HomeScreen(
             context.checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED
         }
     }
+    val learnedCount = remember(refresh) { container.phrases.all().size }
     val taraInstalled = remember(refresh) { TaraCore.isInstalled(context) }
     val isDefaultAssistant = remember(refresh) { context.isDefaultAssistant() }
     val canScheduleAlarms = remember(refresh) { context.canScheduleExactAlarms() }
@@ -283,6 +284,28 @@ private fun HomeScreen(
                         container.prefs.hotwordEnabled = wanted
                         if (wanted) HotwordService.start(context) else HotwordService.stop(context)
                     },
+                )
+            }
+        }
+
+        Spacer(Modifier.height(10.dp))
+
+        Surface(
+            shape = RoundedCornerShape(16.dp),
+            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { context.startActivity(Intent(context, TeachActivity::class.java)) },
+        ) {
+            Column(Modifier.padding(16.dp)) {
+                Text("Teach a phrase", fontWeight = FontWeight.Medium)
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    "If Sentry always mishears something — \"call maa\" as \"karma\" — " +
+                        "say it a few times and it will learn what you mean." +
+                        (if (learnedCount > 0) "  ($learnedCount learned)" else ""),
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }

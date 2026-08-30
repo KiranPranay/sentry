@@ -8,6 +8,9 @@ import androidx.core.content.ContextCompat
 
 data class ContactMatch(val name: String, val number: String)
 
+/** Contacts to bias recognition towards. Beyond this the grammar costs more than it gives. */
+private const val MAX_BIAS_NAMES = 80
+
 /**
  * Finding the person the user meant.
  *
@@ -38,6 +41,48 @@ class Contacts(private val context: Context) {
             .map { (_, group) -> group.first() }
 
         return ContactRanker.rank(byName, query)
+    }
+
+    /**
+     * Names worth biasing the recogniser towards.
+     *
+     * Starred contacts, because that is the only signal available without
+     * `READ_CALL_LOG` — and the people someone calls by voice are overwhelmingly the
+     * people they have starred. First names only: nobody says "call Ravi Kumar
+     * Reddy" to a phone, and a long phrase in the grammar is dead weight.
+     *
+     * Capped, because this list is compiled into an FST every time the microphone
+     * opens. A thousand contacts would cost more in build time than the accuracy is
+     * worth.
+     */
+    fun biasNames(limit: Int = MAX_BIAS_NAMES): List<String> {
+        if (!hasPermission()) return emptyList()
+
+        val names = mutableListOf<String>()
+        runCatching {
+            context.contentResolver.query(
+                ContactsContract.Contacts.CONTENT_URI,
+                arrayOf(ContactsContract.Contacts.DISPLAY_NAME),
+                "${ContactsContract.Contacts.STARRED} = 1",
+                null,
+                "${ContactsContract.Contacts.DISPLAY_NAME} ASC",
+            )?.use { cursor ->
+                val column = cursor.getColumnIndex(ContactsContract.Contacts.DISPLAY_NAME)
+                if (column < 0) return@use
+                while (cursor.moveToNext() && names.size < limit) {
+                    val display = cursor.getString(column) ?: continue
+                    // Strip emoji and decoration, then take the first word.
+                    val first = display.lowercase()
+                        .filter { it.isLetter() || it == ' ' }
+                        .trim()
+                        .split(' ')
+                        .firstOrNull { it.length >= 2 }
+                        ?: continue
+                    names.add(first)
+                }
+            }
+        }
+        return names.distinct()
     }
 
     private fun queryContacts(query: String): List<ContactMatch> {
