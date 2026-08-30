@@ -90,17 +90,12 @@ class Skills(
     private val contacts = Contacts(context)
 
     /**
-     * A stop on anything that reaches another person.
-     *
-     * Exists because testing a voice assistant means saying "call maa" to it, and a
-     * command that works rings a real phone belonging to someone who did not ask to
-     * be part of the test. Four such calls went out during one night of development,
-     * two of them after midnight. Care was not enough; a switch is.
+     * A stop on anything with a blast radius: calls, messages, alarms, timers, music.
      *
      * Off in normal use — nothing in the release build ever sets it — so an assistant
-     * that cannot call anyone is a state only a test can put it in.
+     * that cannot ring anything is a state only a test can put it in.
      */
-    val reachOthers = OutboundGuard()
+    val disturbances = Disturbances()
 
     /** What was last offered as a numbered list, so "the second one" can resolve. */
     private var pendingChoices: List<ContactMatch> = emptyList()
@@ -137,8 +132,10 @@ class Skills(
         is Command.SetTimer -> setTimer(command)
         Command.ShowAlarms -> showClock(AlarmClock.ACTION_SHOW_ALARMS, "alarms")
         Command.ShowTimers -> showClock(AlarmClock.ACTION_SHOW_TIMERS, "timers")
-        Command.CancelTimer -> dismissClock(AlarmClock.ACTION_DISMISS_TIMER, "timer")
-        Command.CancelAlarm -> dismissClock(AlarmClock.ACTION_DISMISS_ALARM, "alarm")
+        Command.CancelTimer ->
+            dismissClock(AlarmClock.ACTION_DISMISS_TIMER, AlarmClock.ACTION_SHOW_TIMERS, "timer")
+        Command.CancelAlarm ->
+            dismissClock(AlarmClock.ACTION_DISMISS_ALARM, AlarmClock.ACTION_SHOW_ALARMS, "alarm")
 
         is Command.Call -> call(command.query)
         is Command.CallNumber -> placeCall(command.number, command.number)
@@ -184,6 +181,7 @@ class Skills(
     // ----------------------------------------------------------------- time
 
     private fun setAlarm(command: Command.SetAlarm): Reply {
+        quietly("set an alarm")?.let { return it }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             val alarms = context.getSystemService(AlarmManager::class.java)
             if (alarms?.canScheduleExactAlarms() == false) {
@@ -209,6 +207,7 @@ class Skills(
     }
 
     private fun setTimer(command: Command.SetTimer): Reply {
+        quietly("start a timer")?.let { return it }
         val intent = Intent(AlarmClock.ACTION_SET_TIMER).apply {
             putExtra(AlarmClock.EXTRA_LENGTH, command.seconds)
             command.label?.let { putExtra(AlarmClock.EXTRA_MESSAGE, it) }
@@ -230,23 +229,31 @@ class Skills(
     }
 
     /**
-     * Stop a running timer or a ringing alarm.
+     * Silence a timer or alarm that is going off, and show the rest.
      *
-     * Sent without a search extra, which asks the clock app to deal with whatever is
-     * currently going: that is what "cancel the timer" means when there is one timer,
-     * and when there are several it puts the choice where the user can see them.
+     * ACTION_DISMISS_TIMER only affects a timer that has already expired. Measured,
+     * not assumed: sent against a ninety-second timer with sixty seconds left it did
+     * nothing at all and the timer rang on schedule; sent while that same timer was
+     * ringing it stopped instantly. Android exposes no way to delete a timer that is
+     * still counting down — only the clock app itself can do that.
      *
-     * [Intent.FLAG_ACTIVITY_NO_ANIMATION] because dismissing something is not worth a
-     * screen transition — on a phone with one timer running nothing needs to be shown
-     * at all.
+     * So the dismiss handles the urgent case, the one people shout at a phone, and
+     * the timer list follows for the case it cannot touch: a countdown the user
+     * wanted rid of is then one tap away instead of zero, which is the best this
+     * platform allows and better than claiming to have cancelled something that is
+     * still running.
      */
-    private fun dismissClock(action: String, what: String): Reply {
-        val intent = Intent(action)
+    private fun dismissClock(action: String, listAction: String, what: String): Reply {
+        val dismiss = Intent(action)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION)
-        if (!canResolve(intent)) return Reply.error("There's no clock app on this phone.")
-        context.startActivity(preferSystemHandler(intent))
+        if (!canResolve(dismiss)) return Reply.error("There's no clock app on this phone.")
+        context.startActivity(preferSystemHandler(dismiss))
+
+        val list = Intent(listAction).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        if (canResolve(list)) context.startActivity(preferSystemHandler(list))
+
         return Reply(
-            "Cancelled the $what.",
+            "Stopped anything ringing. Here are your ${what}s if one is still going.",
             Chip(ChipIcon.ALARM, what.replaceFirstChar { it.uppercase() }),
         )
     }
@@ -401,9 +408,9 @@ class Skills(
         if (!has(Manifest.permission.CALL_PHONE)) {
             return needsPermission("I need permission to place calls.")
         }
-        if (reachOthers.blocked) {
+        if (disturbances.blocked) {
             Log.i(TAG, "would call $who ($number)")
-            return Reply("I would call $who, but reaching people is switched off.")
+            return Reply("I would call $who, but disturbances are switched off.")
         }
         val intent = Intent(Intent.ACTION_CALL, Uri.parse("tel:$number"))
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -476,13 +483,13 @@ class Skills(
         if (!canResolve(intent)) {
             return Reply.error("There's no ${channel.label} app that can do that.")
         }
-        if (reachOthers.blocked) {
+        if (disturbances.blocked) {
             // Nothing is sent by opening a composer, but opening a chat still marks
             // it read, and a read receipt at three in the morning is a message of
             // its own.
             Log.i(TAG, "would open ${channel.label} for ${match.name}: $intent")
             return Reply("I would open ${channel.label} for ${match.name}, " +
-                "but reaching people is switched off.")
+                "but disturbances are switched off.")
         }
         context.startActivity(intent)
 
@@ -551,6 +558,7 @@ class Skills(
     }
 
     private fun playMusic(query: String?, provider: Provider?): Reply {
+        quietly("play that")?.let { return it }
         if (provider != null) return playOn(provider, query)
 
         val intent = Intent(MediaStore.INTENT_ACTION_MEDIA_PLAY_FROM_SEARCH).apply {
@@ -961,6 +969,20 @@ class Skills(
             ComponentName(only.activityInfo.packageName, only.activityInfo.name)
         )
     }
+
+    /**
+     * Refuse an action that would make a noise, when noise is switched off.
+     *
+     * Returns null in normal use, so every caller is one line and the guard cannot be
+     * left off a new skill by forgetting to wrap it in an if.
+     */
+    private fun quietly(what: String): Reply? =
+        if (disturbances.blocked) {
+            Log.i(TAG, "would $what")
+            Reply("I would $what, but disturbances are switched off.")
+        } else {
+            null
+        }
 
     private fun needsPermission(message: String) = Reply(
         "$message Open Sentry to grant it.",

@@ -19,7 +19,19 @@ package com.sentry.skills
 class Lookup(
     private val matches: List<ContactMatch>,
     val certain: Boolean,
-) : List<ContactMatch> by matches
+) : List<ContactMatch> by matches {
+
+    // Delegation forwards the interface but not equals/hashCode, which would leave
+    // `listOf(a) == lookup` true and `lookup == listOf(a)` false — an asymmetry that
+    // holds until the day something puts one in a set. Certainty is deliberately not
+    // part of it: this is a list of matches that happens to know how sure it is, and
+    // comparing it as anything else is what the asymmetry would invite.
+    override fun equals(other: Any?): Boolean = matches == other
+
+    override fun hashCode(): Int = matches.hashCode()
+
+    override fun toString(): String = "$matches${if (certain) "" else " (unsure)"}"
+}
 
 object ContactRanker {
 

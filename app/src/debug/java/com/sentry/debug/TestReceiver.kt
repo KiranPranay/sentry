@@ -129,11 +129,11 @@ class TestReceiver : BroadcastReceiver() {
             }
 
             ACTION_REACH -> {
-                // "--ez on false" before a test sweep, and nothing said to Sentry can
-                // ring a phone that belongs to someone else.
+                // "--ez on false" before a test sweep, and nothing said to Sentry
+                // can ring a phone, a room, or anybody else's evening.
                 val on = intent.getBooleanExtra("on", true)
-                if (on) container.skills.reachOthers.allow() else container.skills.reachOthers.block()
-                Log.i(TAG, "reaching other people: ${if (on) "allowed" else "BLOCKED"}")
+                if (on) container.skills.disturbances.allow() else container.skills.disturbances.block()
+                Log.i(TAG, "disturbances: ${if (on) "allowed" else "BLOCKED"}")
             }
 
             ACTION_WHO -> {
