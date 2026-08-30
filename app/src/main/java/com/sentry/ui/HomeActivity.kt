@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -33,6 +34,7 @@ import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
@@ -42,6 +44,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -53,6 +56,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.sentry.sentry
 import com.sentry.ui.theme.SentryTheme
 import com.sentry.voice.HotwordService
+import com.sentry.voice.SpeechPack
+import kotlinx.coroutines.launch
 import dev.taracore.client.TaraCore
 
 /**
@@ -98,6 +103,8 @@ private fun HomeScreen(
     val container = context.sentry
 
     val speechReady by container.voice.ready.collectAsStateWithLifecycle()
+    var speechPack by remember { mutableStateOf(container.prefs.speechPack) }
+    val scope = rememberCoroutineScope()
 
     // Recomposition trigger: the checks below read system state that changes while
     // the user is away in Settings, so a returning user sees the truth.
@@ -173,10 +180,65 @@ private fun HomeScreen(
 
         SetupCard(
             title = "Speech model",
-            detail = if (speechReady) "Ready. Recognition runs offline."
-            else "Unpacking the offline speech model…",
+            detail = if (speechReady) "${speechPack.label} — recognition runs offline."
+            else "Unpacking ${speechPack.label}…",
             done = speechReady,
         )
+
+        // Accent, not size, is what decides whether recognition works. Nobody can
+        // pick this correctly on the user's behalf, so it is a visible choice rather
+        // than a build-time constant.
+        Surface(
+            shape = RoundedCornerShape(16.dp),
+            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 10.dp),
+        ) {
+            Column(Modifier.padding(16.dp)) {
+                Text("Recognise my accent as", fontWeight = FontWeight.Medium)
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    "If Sentry keeps mishearing you, change this. It matters more " +
+                        "than model size.",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(12.dp))
+
+                SpeechPack.entries.forEach { option ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(enabled = option != speechPack) {
+                                speechPack = option
+                                container.prefs.speechPack = option
+                                scope.launch { container.voice.use(option) }
+                            }
+                            .padding(vertical = 6.dp),
+                    ) {
+                        RadioButton(
+                            selected = option == speechPack,
+                            onClick = {
+                                speechPack = option
+                                container.prefs.speechPack = option
+                                scope.launch { container.voice.use(option) }
+                            },
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Column {
+                            Text(option.label)
+                            Text(
+                                option.detail,
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
+        }
 
         SetupCard(
             title = "Default assistant",

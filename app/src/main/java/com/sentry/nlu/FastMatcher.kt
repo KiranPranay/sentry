@@ -179,15 +179,19 @@ object FastMatcher {
 
     private fun matchTorch(s: String): Command? {
         if (TORCH_WORDS.none { s.contains(it) }) return null
-        val on = Regex("""\b(on|enable|turn up|switch on)\b""").containsMatchIn(s)
-        val off = Regex("""\b(off|disable|kill|switch off)\b""").containsMatchIn(s)
-        return when {
-            off -> Command.Torch(false)
-            on -> Command.Torch(true)
-            // A bare "flashlight" means turn it on; nobody says it to turn one off.
-            s in TORCH_WORDS -> Command.Torch(true)
-            else -> null
+
+        // A question about the torch is a question, not an instruction.
+        val first = s.split(' ').firstOrNull().orEmpty()
+        if (first in setOf("what", "where", "why", "when", "how", "is", "was", "did")) {
+            return null
         }
+
+        val off = Regex("""\b(off|disable|kill|switch off|stop)\b""").containsMatchIn(s)
+        // Anything else mentioning the torch means turn it on. Recognition drops
+        // small words constantly — "turn on the flashlight" came back as "the
+        // flashlight" — and requiring the word "on" throws the command away over a
+        // syllable the user did say.
+        return Command.Torch(!off)
     }
 
     // -------------------------------------------------------- media control

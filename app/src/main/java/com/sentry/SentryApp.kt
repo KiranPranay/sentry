@@ -43,6 +43,7 @@ class Container(context: Context) {
     val prefs = Prefs(appContext)
 
     val voice = VoiceEngine(appContext).apply {
+        pack = prefs.speechPack
         // Let the recogniser prefer a hypothesis that is an actual command. This is
         // the only place the audio layer and the language layer meet, and it is a
         // one-way predicate rather than a dependency.

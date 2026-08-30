@@ -101,6 +101,32 @@ Two other guards keep an always-open microphone from talking to itself:
 - **A hangover on "speaking".** A streamed answer is spoken sentence by sentence, and
   the flag flickers false in the gaps while the speaker is still physically playing.
 
+## Recognition
+
+Two acoustic models ship, and the setup screen lets you pick:
+
+| Pack | For |
+|---|---|
+| **English (India)** *(default)* | Indian-accented English |
+| English (US) | American-accented English |
+
+Accent matters more than size here. A US model transcribing Indian-accented English
+mishears in ways more parameters do not fix, so this is a visible choice rather than a
+build-time constant.
+
+Both are *small* models, and that is a finding rather than a compromise.
+`vosk-model-en-us-0.22-lgraph` was tried — 205 MB unpacked, and better on paper — and
+abandoned: on a Pixel 9a it decodes full-vocabulary audio at **1.1–2.0× real time**.
+The microphone keeps producing audio while it works, the buffer overruns, and the
+words that get dropped are the user's. "Set a timer for five minutes" came back as
+"set a timer for", and "who wrote the book Dune" as "the". Tuning the beam
+(`max-active` 7000 → 3000) helped but did not close the gap. A decoder that cannot
+keep up does not give worse answers; it gives truncated ones, which is worse than a
+smaller model that finishes.
+
+Endpointing counts **consumed audio, not elapsed time**, for the same reason: a
+wall-clock timer declares the speaker finished while their words are still queued.
+
 ## The model
 
 Sentry ships no weights and no inference engine. It asks
@@ -174,11 +200,10 @@ parsing, where an alarm set twelve hours out is worse than one that failed to be
 
 ## Known limits
 
-- **Speech recognition is the weakest link.** The bundled model is
-  `vosk-model-small-en-us-0.15` (68 MB, ~10% WER on clean read speech). It mishears
-  names and uncommon words; "who wrote the book Dune" came back as "how about the book
-  don't". `vosk-model-en-us-0.22-lgraph` is roughly twice the size and materially
-  better, and is the obvious upgrade if the APK can afford it.
+- **Speech recognition is the weakest link**, and it is bounded by what will decode
+  in real time on a phone rather than by what is available. Uncommon words and names
+  are where it shows. If Sentry keeps mishearing you, change the accent setting first;
+  it is a bigger lever than anything else here.
 - **`libvosk.so` is not 16 KB page aligned**, which Android 15+ warns about on devices
   with 16 KB pages. It runs fine on 4 KB devices; the fix is upstream in vosk-android.
 - **Barge-in requires the wake word**, for the reasons above.

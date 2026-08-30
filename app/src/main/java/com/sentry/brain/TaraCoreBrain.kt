@@ -3,7 +3,6 @@ package com.sentry.brain
 import android.content.Context
 import android.util.Log
 import dev.taracore.api.ChatMessageParcel
-import dev.taracore.api.Gbnf
 import dev.taracore.client.ChatParams
 import dev.taracore.client.Constraint
 import dev.taracore.client.TaraCore
@@ -45,8 +44,19 @@ class TaraCoreBrain(context: Context) : Brain {
         TaraCore.isInstalled(appContext) && runCatching { ensureConnected() }.isSuccess
 
     override suspend fun warmUp() {
-        runCatching { ensureConnected() }
-            .onFailure { Log.w(TAG, "warm-up failed", it) }
+        runCatching {
+            ensureConnected()
+            // Ask the service to make the user's chosen model resident. It takes no
+            // model id — the engine is shared, and picking one on every other app's
+            // behalf is not ours to do — and it may decline, which is fine: the next
+            // request still works, it just pays the load. Without this the first
+            // question of any hour waits on a gigabyte coming off storage, because
+            // the idle unloader has been.
+            if (apiVersion >= 3) {
+                val warmed = client.warmUpQuietly()
+                Log.i(TAG, if (warmed) "model warmed" else "service declined to warm")
+            }
+        }.onFailure { Log.w(TAG, "warm-up failed", it) }
     }
 
     private suspend fun ensureConnected() {
@@ -109,20 +119,19 @@ class TaraCoreBrain(context: Context) : Brain {
 
     private fun toGrammar(shape: Shape): String? = when (shape) {
         is Shape.OneOf -> Constraint.oneOf(shape.options)
-        is Shape.Json -> Constraint.gbnf(
-            Gbnf.jsonSchema(
-                Gbnf.SchemaNode.Obj(
-                    properties = shape.fields.map { field ->
-                        field.name to when (field.type) {
-                            Shape.FieldType.STRING -> Gbnf.SchemaNode.StringType
-                            Shape.FieldType.INTEGER -> Gbnf.SchemaNode.IntegerType
-                            Shape.FieldType.NUMBER -> Gbnf.SchemaNode.NumberType
-                            Shape.FieldType.BOOLEAN -> Gbnf.SchemaNode.BooleanType
-                        }
-                    },
-                    required = shape.fields.filter { it.required }.map { it.name }.toSet(),
-                )
-            )
-        )
+
+        // Constraint.obj rather than a hand-built schema tree: this is the shape the
+        // whole planner depends on, and expressing it in the SDK's own vocabulary
+        // means the guarantee is the SDK's to keep.
+        is Shape.Json -> Constraint.obj {
+            for (field in shape.fields) {
+                when (field.type) {
+                    Shape.FieldType.STRING -> string(field.name, field.required)
+                    Shape.FieldType.INTEGER -> integer(field.name, field.required)
+                    Shape.FieldType.NUMBER -> number(field.name, field.required)
+                    Shape.FieldType.BOOLEAN -> boolean(field.name, field.required)
+                }
+            }
+        }
     }
 }

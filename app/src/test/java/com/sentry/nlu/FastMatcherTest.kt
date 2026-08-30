@@ -100,6 +100,22 @@ class FastMatcherTest {
     // ------------------------------------------------------------------- media
 
     @Test
+    fun `a torch command survives dropped words`() {
+        // Recognition of "turn on the flashlight" produced "the flashlight". The
+        // user said the important word; losing the command over "turn on" is worse
+        // than acting on it.
+        assertEquals(Command.Torch(true), FastMatcher.match("the flashlight"))
+        assertEquals(Command.Torch(true), FastMatcher.match("flashlight please"))
+        assertEquals(Command.Torch(false), FastMatcher.match("flashlight off"))
+    }
+
+    @Test
+    fun `a question about the torch is not a torch command`() {
+        assertNull(FastMatcher.match("where is my flashlight"))
+        assertNull(FastMatcher.match("is the flashlight on"))
+    }
+
+    @Test
     fun `media transport controls`() {
         assertEquals(Command.MediaControl(MediaAction.NEXT), FastMatcher.match("next song"))
         assertEquals(Command.MediaControl(MediaAction.PAUSE), FastMatcher.match("pause"))

@@ -3,6 +3,7 @@ package com.sentry.data
 import android.content.Context
 import androidx.core.content.edit
 import com.sentry.brain.Brains
+import com.sentry.voice.SpeechPack
 
 /**
  * The handful of settings Sentry has.
@@ -18,6 +19,7 @@ class Prefs(context: Context) {
         const val KEY_HOTWORD = "hotword_enabled"
         const val KEY_BACKEND = "backend"
         const val KEY_LOCKSCREEN = "lockscreen_enabled"
+        const val KEY_SPEECH_PACK = "speech_pack"
     }
 
     private val prefs = context.applicationContext.getSharedPreferences(FILE, Context.MODE_PRIVATE)
@@ -31,6 +33,11 @@ class Prefs(context: Context) {
     var lockscreenEnabled: Boolean
         get() = prefs.getBoolean(KEY_LOCKSCREEN, true)
         set(value) = prefs.edit { putBoolean(KEY_LOCKSCREEN, value) }
+
+    /** Which acoustic model to recognise with. Accent, not size, is the point. */
+    var speechPack: SpeechPack
+        get() = SpeechPack.from(prefs.getString(KEY_SPEECH_PACK, null))
+        set(value) = prefs.edit { putString(KEY_SPEECH_PACK, value.name) }
 
     var backend: String
         get() = prefs.getString(KEY_BACKEND, Brains.Preference.AUTO.name)

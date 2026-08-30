@@ -54,8 +54,22 @@ class VoiceEngine(private val context: Context) {
 
         const val SAMPLE_RATE = 16_000
 
-        /** Vosk's en-us model, unpacked from assets on first run. */
-        private const val MODEL_ASSET = "model-en-us"
+
+        /**
+         * Bumped whenever the bundled acoustic model changes.
+         *
+         * The unpacked copy lives in filesDir and outlives an app update, so without
+         * a version here a new model ships inside the APK and is never used: the
+         * "already unpacked" marker from the old one is still sitting there and the
+         * engine happily loads last month's weights forever.
+         *
+         * Note it covers conf/ as well as the weights: a retuned model.conf that does
+         * not reach the device is indistinguishable from one that did not help.
+         *
+         * v4 — small en-in and en-us packs, selectable. The large lgraph model was
+         *      tried at v2/v3 and could not decode in real time on this hardware.
+         */
+        private const val MODEL_VERSION = "4-small-packs"
 
         /**
          * The wake word, plus Vosk's out-of-vocabulary token.
@@ -87,19 +101,43 @@ class VoiceEngine(private val context: Context) {
          * hypotheses and picking one that is a real command turns that knowledge into
          * accuracy, without constraining the grammar and losing free conversation.
          */
-        private const val N_BEST = 6
+        private const val N_BEST = 1
 
         /** Level above which a frame counts as somebody talking. */
         private const val SPEECH_LEVEL = 0.08f
 
         /**
-         * Peak an utterance must reach before its transcription is believed.
+         * Peak below which nothing is speech, at any distance.
          *
-         * Set from measurement rather than taste: speech at arm's length peaks well
-         * above this, while a quiet room sits below it even when the decoder insists
-         * it heard a sentence.
+         * Deliberately low. This gate exists to reject room tone and our own echo,
+         * and the cost of setting it too high is the worst failure this assistant
+         * has: the user talks and is silently ignored. Measured echo from the phone's
+         * own speaker sat at 0.02–0.08; genuine speech across a room clears 0.12
+         * comfortably.
          */
-        private const val UTTERANCE_PEAK = 0.22f
+        private const val NOISE_PEAK = 0.12f
+
+        /**
+         * The stricter bar, applied only while our own voice could still be in the
+         * room — during an answer and for a moment after.
+         *
+         * Two tiers rather than one because the two situations are not alike. With
+         * the speaker silent, anything above the noise floor deserves a hearing.
+         * With Sentry mid-sentence, the likeliest source of a quiet utterance is
+         * Sentry, so the evidence required goes up.
+         */
+        private const val ECHO_PEAK = 0.22f
+
+        /** How long after speaking our voice may still reach the microphone. */
+        private const val ECHO_WINDOW_MS = 1_500L
+
+        /**
+         * Decode time per second of audio, above which recognition degrades.
+         *
+         * Not 1.0: some headroom is fine, since the buffer absorbs bursts. Sustained
+         * above this and the backlog grows for as long as the person keeps talking.
+         */
+        private const val REALTIME_BUDGET = 0.7
 
         /** Longer than this and the utterance is speech, not a command to correct. */
         private const val MAX_RERANK_WORDS = 4
@@ -170,6 +208,14 @@ class VoiceEngine(private val context: Context) {
     @Volatile
     private var model: Model? = null
 
+    /** Which pack is loaded right now, so a change can be noticed. */
+    @Volatile
+    private var loadedPack: SpeechPack? = null
+
+    /** Which pack *should* be loaded. Set from settings. */
+    @Volatile
+    var pack: SpeechPack = SpeechPack.DEFAULT
+
     private var captureJob: Job? = null
 
     /**
@@ -226,19 +272,28 @@ class VoiceEngine(private val context: Context) {
      * of the APK), instant afterwards.
      */
     suspend fun prepare(): Boolean = modelLock.withLock {
-        if (model != null) return@withLock true
+        val wanted = pack
+        if (model != null && loadedPack == wanted) return@withLock true
+
         withContext(Dispatchers.IO) {
             runCatching {
-                val target = File(context.filesDir, MODEL_ASSET)
+                // Switching packs: drop the old one first. Two of these resident at
+                // once is a hundred megabytes of mapped model for no reason.
+                model?.let { runCatching { it.close() } }
+                model = null
+                _ready.value = false
+
+                val target = File(context.filesDir, wanted.asset)
                 if (!isUnpacked(target)) {
-                    Log.i(TAG, "unpacking acoustic model")
+                    Log.i(TAG, "unpacking ${wanted.label}")
                     target.deleteRecursively()
-                    unpack(MODEL_ASSET, target)
+                    unpack(wanted.asset, target)
                 }
                 model = Model(target.absolutePath)
+                loadedPack = wanted
                 _ready.value = true
                 _events.tryEmit(Event.ModelReady)
-                Log.i(TAG, "acoustic model ready")
+                Log.i(TAG, "acoustic model ready (${wanted.label})")
                 true
             }.getOrElse {
                 Log.e(TAG, "could not load the acoustic model", it)
@@ -249,15 +304,45 @@ class VoiceEngine(private val context: Context) {
     }
 
     /**
-     * A marker written only after a complete copy, so an unpack interrupted by the
-     * process dying is retried instead of loading a half-written model.
+     * Change acoustic model, reloading and resuming whatever was being listened for.
+     *
+     * Also removes the pack being left behind: each is tens of megabytes unpacked in
+     * filesDir, and keeping the losers around costs the user storage for a choice
+     * they have already made.
+     */
+    suspend fun use(newPack: SpeechPack) {
+        if (newPack == pack && model != null) return
+        val resumeAs = _mode.value
+        pack = newPack
+        stop()
+        prepare()
+
+        withContext(Dispatchers.IO) {
+            SpeechPack.entries.filter { it != newPack }.forEach {
+                runCatching { File(context.filesDir, it.asset).deleteRecursively() }
+            }
+        }
+
+        when (resumeAs) {
+            Mode.HOTWORD -> startHotword()
+            Mode.COMMAND -> startCommand()
+            Mode.OFF -> Unit
+        }
+    }
+
+    /**
+     * A marker written only after a complete copy, carrying the model version.
+     *
+     * Guards two different failures: an unpack interrupted by the process dying, and
+     * an app update that ships a different model than the one already on disk.
      */
     private fun isUnpacked(target: File): Boolean =
-        File(target, ".complete").exists()
+        runCatching { File(target, ".complete").readText().trim() == MODEL_VERSION }
+            .getOrDefault(false)
 
     private fun unpack(assetPath: String, target: File) {
         copyAsset(assetPath, target)
-        File(target, ".complete").writeText("1")
+        File(target, ".complete").writeText(MODEL_VERSION)
     }
 
     private fun copyAsset(assetPath: String, target: File) {
@@ -341,9 +426,12 @@ class VoiceEngine(private val context: Context) {
             _events.tryEmit(Event.Failed("This device cannot record at 16 kHz"))
             return@withContext
         }
-        // Four times the minimum: enough slack that a scheduling hiccup does not
-        // overrun the buffer and lose audio mid-word.
-        val bufferSize = minBuffer * 4
+        // Eight times the minimum. The decoder runs on this same loop, and a large
+        // acoustic model takes long enough per chunk that a four-times buffer
+        // overruns: audio is dropped, the decoder sees the gap as a pause, and it
+        // endpoints in the middle of the sentence. "Who wrote the book Dune" came
+        // back as "the".
+        val bufferSize = minBuffer * 8
         val chunk = ShortArray(minBuffer / 2)
 
         val recorder = runCatching {
@@ -376,7 +464,10 @@ class VoiceEngine(private val context: Context) {
                 Recognizer(currentModel, SAMPLE_RATE.toFloat(), HOTWORD_GRAMMAR)
             } else {
                 Recognizer(currentModel, SAMPLE_RATE.toFloat()).apply {
-                    setMaxAlternatives(N_BEST)
+                    // Alternatives cost real lattice work, and on a large graph that
+                    // is the difference between keeping up with the microphone and
+                    // not. Only ask for them when a re-ranker will actually use them.
+                    if (N_BEST > 1) setMaxAlternatives(N_BEST)
                 }
             }
         }.getOrElse {
@@ -410,7 +501,17 @@ class VoiceEngine(private val context: Context) {
 
         Log.d(TAG, "capture started in $mode")
 
-        var startedAt = System.currentTimeMillis()
+        // Milliseconds of audio actually consumed, which is not the same as
+        // milliseconds elapsed.
+        //
+        // Endpointing has to measure silence *in the stream*, not on the clock. A
+        // decoder running behind real time leaves audio queued in the buffer, and a
+        // wall-clock timer then declares the user finished while most of what they
+        // said is still undecoded — which is how "who wrote the book Dune" became
+        // "the". Counting consumed audio is immune to that: a pause is a pause
+        // however late we get to it.
+        var streamMs = 0L
+        var startedAt = 0L
         var lastSpeechAt = 0L
         var heardAnything = false
 
@@ -421,6 +522,15 @@ class VoiceEngine(private val context: Context) {
         // cheaper and far more reliable than trying to filter the nonsense afterwards.
         var peak = 0f
 
+        // When our own voice was last in the room, for choosing which bar to apply.
+        var spokeAt = 0L
+
+        // Decoding must stay ahead of the microphone. Reported per utterance rather
+        // than per chunk, because one slow chunk means nothing and a sustained ratio
+        // above 1.0 means the user's words are being cut off.
+        var decodeNanos = 0L
+        var audioNanos = 0L
+
         try {
             while (isActive) {
                 val read = recorder.read(chunk, 0, chunk.size)
@@ -429,8 +539,15 @@ class VoiceEngine(private val context: Context) {
                 val level = level(chunk, read)
                 _amplitude.value = smooth(_amplitude.value, level)
 
+                // Decoding has to keep up with the microphone. If it does not, the
+                // buffer overruns and the words that go missing are the user's.
+                val decodeStart = System.nanoTime()
                 val complete = runCatching { recogniser.acceptWaveForm(chunk, read) }
                     .getOrDefault(false)
+                decodeNanos += System.nanoTime() - decodeStart
+                val chunkMs = read * 1000L / SAMPLE_RATE
+                audioNanos += chunkMs * 1_000_000L
+                streamMs += chunkMs
 
                 // While Sentry is speaking, the only thing that counts as the user
                 // cutting in is the wake word — decoded by a *separate* recogniser
@@ -449,8 +566,9 @@ class VoiceEngine(private val context: Context) {
                 if (speaking && barge != null) {
                     // Hold the clocks: they measure how long the *user* has been
                     // silent, and the user is not being silent, they are listening.
-                    startedAt = System.currentTimeMillis()
+                    startedAt = streamMs
                     lastSpeechAt = 0L
+                    spokeAt = streamMs
 
                     val interrupt = runCatching {
                         if (barge.acceptWaveForm(chunk, read)) textOf(barge.result)
@@ -484,7 +602,7 @@ class VoiceEngine(private val context: Context) {
                 }
 
                 // ------------------------------------------------- command mode
-                val now = System.currentTimeMillis()
+                val now = streamMs
 
                 // Thinking: transcribe as normal, but do not let the clocks run out
                 // from under an answer that is still being produced.
@@ -503,8 +621,9 @@ class VoiceEngine(private val context: Context) {
                     val text = textOf(recogniser.result)
                     if (text.isNotBlank()) {
                         _partial.value = ""
-                        if (peak < UTTERANCE_PEAK) {
-                            Log.d(TAG, "ignoring \"$text\" (peak $peak, likely noise)")
+                        val floor = requiredPeak(spokeAt, now)
+                        if (peak < floor) {
+                            Log.d(TAG, "ignoring \"$text\" (peak $peak below $floor)")
                             peak = 0f
                             recogniser.reset()
                             continue
@@ -532,7 +651,7 @@ class VoiceEngine(private val context: Context) {
                 if (finished || ranLong) {
                     val text = textOf(recogniser.finalResult).ifBlank { _partial.value }
                     _partial.value = ""
-                    if (text.isNotBlank() && peak >= UTTERANCE_PEAK) {
+                    if (text.isNotBlank() && peak >= requiredPeak(spokeAt, now)) {
                         Log.d(TAG, "transcript (silence): \"$text\"")
                         _events.tryEmit(Event.Transcript(text))
                     } else {
@@ -547,6 +666,12 @@ class VoiceEngine(private val context: Context) {
                 }
             }
         } finally {
+            if (audioNanos > 0) {
+                val ratio = decodeNanos.toDouble() / audioNanos
+                val message = "decode %.2fx real time".format(ratio)
+                if (ratio > REALTIME_BUDGET) Log.w(TAG, "$message — words will be dropped")
+                else Log.d(TAG, message)
+            }
             effects.forEach { runCatching { it.release() } }
             runCatching { recorder.stop() }
             runCatching { recorder.release() }
@@ -659,6 +784,13 @@ class VoiceEngine(private val context: Context) {
         }
         return previous[b.length]
     }
+
+    /**
+     * The bar this utterance has to clear: strict while our own voice could still be
+     * in the air, permissive otherwise.
+     */
+    private fun requiredPeak(spokeAt: Long, now: Long): Float =
+        if (spokeAt > 0 && now - spokeAt < ECHO_WINDOW_MS) ECHO_PEAK else NOISE_PEAK
 
     private fun partialOf(json: String?): String = runCatching {
         JSONObject(json ?: return "").optString("partial").trim()

@@ -47,6 +47,14 @@ class Planner(private val brains: Brains) {
             "which", "whose", "how", "explain", "describe", "define",
         )
 
+        /**
+         * Words an utterance needs before the classifier may turn it into an action.
+         *
+         * Real commands are at least two words ("torch on", "call amma"), and every
+         * one-word command people actually use is already in [FastMatcher].
+         */
+        const val MIN_ACTION_WORDS = 2
+
         const val CLASSIFY_PROMPT =
             "You label what the user wants from a phone assistant. " +
                 "Answer with exactly one label and nothing else.\n" +
@@ -68,6 +76,19 @@ class Planner(private val brains: Brains) {
         // question word is a reliable signal.
         if (looksLikeAQuestion(text)) {
             Log.d(TAG, "\"$text\" -> conversation (question)")
+            return Command.Chat(text)
+        }
+
+        // A single unrecognised word must never become a device action.
+        //
+        // With the microphone open all the time, most one-word utterances are
+        // mis-hearings rather than commands, and the classifier will confidently
+        // label one anyway: asked to place a call, the recogniser produced "karma"
+        // and the classifier answered "flashlight", so Sentry turned on the torch.
+        // Conversation is the safe home for these — worst case it says something
+        // harmless, instead of doing something wrong.
+        if (wordCount(text) < MIN_ACTION_WORDS) {
+            Log.d(TAG, "\"$text\" -> conversation (too short to act on)")
             return Command.Chat(text)
         }
 
@@ -103,6 +124,9 @@ class Planner(private val brains: Brains) {
             else -> Command.Chat(text)
         }
     }
+
+    private fun wordCount(text: String): Int =
+        text.trim().split(Regex("[^\\p{L}\\p{N}']+")).count { it.isNotBlank() }
 
     private fun looksLikeAQuestion(text: String): Boolean {
         val first = text.trim().lowercase()

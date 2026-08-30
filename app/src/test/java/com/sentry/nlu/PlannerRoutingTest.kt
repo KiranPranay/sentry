@@ -36,6 +36,16 @@ class PlannerRoutingTest {
     }
 
     @Test
+    fun `one word mishearings are not commands`() {
+        // "call maa" came back as "karma", and the classifier labelled it
+        // "flashlight". Nothing here may fast-match, and the planner refuses to act
+        // on anything this short that did not.
+        for (noise in listOf("karma", "come", "troop", "lucky", "dynasty", "alberta")) {
+            assertNull("\"$noise\" must not be a command", FastMatcher.match(noise))
+        }
+    }
+
+    @Test
     fun `device questions are still answered without a model`() {
         // These look like questions but have a real answer on the device, so they
         // must be caught before anything conversational happens.
