@@ -26,6 +26,19 @@ object FactMatcher {
      * with nonsense in memory, so questions are refused outright before any pattern
      * is tried.
      */
+    /**
+     * An instruction to store what follows, rather than part of the fact itself.
+     *
+     * Kept separate from the patterns so every fact gains it at once: it would be
+     * strange for "remember my blood group is B positive" to work while "remember my
+     * sister is Divya" did not, and writing the preamble into eighteen regexes is how
+     * that kind of inconsistency happens.
+     */
+    private val ASKED_TO_REMEMBER = Regex(
+        """^(?:please\s+)?(?:remember|note|keep in mind|don'?t forget|make a note of|""" +
+            """for the record|just so you know)\s*(?:that\s+)?"""
+    )
+
     private val QUESTION_OPENERS = setOf(
         "what", "whats", "what's", "who", "whos", "who's", "when", "where", "why",
         "which", "how", "do", "does", "did", "is", "are", "was", "were", "can",
@@ -103,12 +116,21 @@ object FactMatcher {
             .trim()
         if (text.isEmpty()) return emptyList()
 
-        if (isQuestion(text)) return emptyList()
+        // "Remember that my sister is Divya" is the most explicit way there is to
+        // state a fact, and it was the one sentence guaranteed to be thrown away:
+        // "remember" is a question opener — it has to be, for "do you remember" — so
+        // the sentence was read as a question and nothing was stored. Stripping the
+        // preamble first settles it, because a sentence that opens by asking to be
+        // remembered is not asking anything else.
+        val body = text.replace(ASKED_TO_REMEMBER, "")
+        val stated = body != text
+
+        if (!stated && isQuestion(body)) return emptyList()
 
         val found = LinkedHashMap<Fact, String>()
         for ((fact, pattern) in PATTERNS) {
             if (found.containsKey(fact)) continue
-            val captured = pattern.find(text)?.groupValues?.getOrNull(1) ?: continue
+            val captured = pattern.find(body)?.groupValues?.getOrNull(1) ?: continue
             val value = clean(captured, raw) ?: continue
             found[fact] = value
         }

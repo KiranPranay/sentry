@@ -131,10 +131,24 @@ object FastMatcher {
     )
     private val REMIND_IN = Regex("""^remind me (?:in|after)\s+(.+?)(?:\s+to\s+(.+))?$""")
 
+    /**
+     * Asking to see a list, in any of the ways people ask.
+     *
+     * These were sets of exact phrases, which meant "show me my alarms" — one word
+     * longer than "show my alarms" — fell through to the language model and came back
+     * as conversation. A fixed phrase list is a phrasebook, not an understanding.
+     */
+    private val SHOW_TIMERS = Regex(
+        """^(?:show|list|see|check|open|what|what are)?\s*(?:me )?(?:my |the )?timers?""" +
+            """(?: do i have| are (?:there|running|set)| i have)?$"""
+    )
+    private val SHOW_ALARMS = Regex(
+        """^(?:show|list|see|check|open|what|what are)?\s*(?:me )?(?:my |the )?alarms?""" +
+            """(?: do i have| are (?:there|set)| i have)?$"""
+    )
+
     private fun matchTimer(s: String): Command? {
-        if (s == "show timers" || s == "show my timers" || s == "my timers") {
-            return Command.ShowTimers
-        }
+        if (SHOW_TIMERS.matches(s)) return Command.ShowTimers
         TIMER.find(s)?.let { m ->
             val rest = m.groupValues[1].ifBlank { m.groupValues[2] }
             TimeWords.duration(rest)?.let { return Command.SetTimer(it) }
@@ -159,13 +173,7 @@ object FastMatcher {
     private val WAKE_ME = Regex("""^wake me(?: up)?(?: at| for| by)?\s+(.+)$""")
 
     private fun matchAlarm(s: String): Command? {
-        if (s in setOf(
-                "show alarms", "show my alarms", "my alarms", "list alarms",
-                "what alarms do i have", "open alarms",
-            )
-        ) {
-            return Command.ShowAlarms
-        }
+        if (SHOW_ALARMS.matches(s)) return Command.ShowAlarms
         // A duration phrase means a timer even when the speaker said "alarm".
         val body = ALARM.find(s)?.groupValues?.get(1) ?: WAKE_ME.find(s)?.groupValues?.get(1)
         if (body != null) {
@@ -269,27 +277,49 @@ object FastMatcher {
 
     // --------------------------------------------------------------- volume
 
-    private val SET_VOLUME = Regex("""^(?:set |change )?volume(?: level)?(?: to)?\s+(\d{1,3})%?$""")
+    private val SET_VOLUME = Regex(
+        """^(?:set |change |put )?(?:the )?volume(?: level)?(?: to| at)?\s+(.+?)%?$"""
+    )
+
+    /** Anything a person might call the sound coming out of the phone. */
+    private const val SOUND = """(?:it|the (?:volume|sound|audio|phone|music))"""
+
+    // Every alternative names the thing being changed. An earlier draft made both the
+    // verb and the object optional, which meant a bare "up" — a perfectly ordinary
+    // word to say mid-sentence — turned the volume up.
+    private val VOLUME_UP = Regex(
+        """^volume (?:up|higher)$""" +
+            """|^(?:make )?(?:it )?louder$|^a (?:bit|little) louder$""" +
+            """|^(?:turn|bump|crank) up $SOUND$|^(?:turn|bump|crank) $SOUND up$""" +
+            """|^(?:increase|raise)(?: the)? volume$"""
+    )
+    private val VOLUME_DOWN = Regex(
+        """^volume (?:down|lower)$""" +
+            """|^(?:make )?(?:it )?(?:quieter|softer)$|^a (?:bit|little) (?:quieter|softer)$""" +
+            """|^(?:turn|bring) down $SOUND$|^(?:turn|bring) $SOUND down$""" +
+            """|^(?:decrease|lower|reduce)(?: the)? volume$"""
+    )
+    private val MUTE = Regex(
+        """^mute(?: $SOUND)?$|^silence $SOUND$|^volume off$""" +
+            """|^(?:turn|switch) off (?:$SOUND|the sound|the audio)$""" +
+            """|^no sound$"""
+    )
+    private val MAX_VOLUME = Regex(
+        """^(?:max|maximum|full|highest|loudest) volume$|^volume (?:max|maximum)$|^loudest$"""
+    )
 
     private fun matchVolume(s: String): Command? {
         SET_VOLUME.find(s)?.let { m ->
-            val pct = m.groupValues[1].toIntOrNull()
+            // Spoken as often as typed: "set the volume to fifty" is the same request
+            // as "volume 50", and only one of them used to work.
+            val pct = Arithmetic.number(m.groupValues[1])?.toInt()
             if (pct != null && pct in 0..100) return Command.Volume(VolumeChange.Percent(pct))
         }
-        return when (s) {
-            "volume up", "turn it up", "turn up the volume", "louder", "increase volume",
-            "turn the volume up", "volume higher" -> Command.Volume(VolumeChange.Up)
-
-            "volume down", "turn it down", "turn down the volume", "quieter", "softer",
-            "decrease volume", "turn the volume down", "lower the volume" ->
-                Command.Volume(VolumeChange.Down)
-
-            "mute", "mute it", "silence it", "volume off", "turn off the volume" ->
-                Command.Volume(VolumeChange.Mute)
-
-            "max volume", "full volume", "volume max", "loudest", "maximum volume" ->
-                Command.Volume(VolumeChange.Max)
-
+        return when {
+            MUTE.matches(s) -> Command.Volume(VolumeChange.Mute)
+            MAX_VOLUME.matches(s) -> Command.Volume(VolumeChange.Max)
+            VOLUME_UP.matches(s) -> Command.Volume(VolumeChange.Up)
+            VOLUME_DOWN.matches(s) -> Command.Volume(VolumeChange.Down)
             else -> null
         }
     }
@@ -390,16 +420,19 @@ object FastMatcher {
         "what's today", "whats today", "today's date", "todays date", "the date",
         "what day is today",
     )
-    private val BATTERY_Q = setOf(
-        "battery", "battery level", "how much battery", "how much battery do i have",
-        "what's my battery", "whats my battery", "battery percentage",
-        "how much charge", "battery status",
+    private val BATTERY_Q = Regex(
+        """^(?:what(?:'s| is)|hows|how(?:'s| is)|check|tell me)?\s*""" +
+            """(?:my |the )?battery(?: level| percentage| status| charge| percent)?""" +
+            """(?: (?:at|left|remaining|doing))?$|""" +
+            """^how much (?:battery|charge)""" +
+            """(?: (?:is (?:left|there|remaining)|do i have|have i got))?$|""" +
+            """^(?:am i|is it) charging$"""
     )
 
-    private fun matchQuery(s: String): Command? = when (s) {
-        in TIME_Q -> Command.TimeQuery
-        in DATE_Q -> Command.DateQuery
-        in BATTERY_Q -> Command.BatteryStatus
+    private fun matchQuery(s: String): Command? = when {
+        s in TIME_Q -> Command.TimeQuery
+        s in DATE_Q -> Command.DateQuery
+        BATTERY_Q.matches(s) -> Command.BatteryStatus
         else -> null
     }
 

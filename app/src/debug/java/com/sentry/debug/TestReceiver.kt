@@ -4,6 +4,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.util.Log
+import com.sentry.nlu.FastMatcher
 import com.sentry.sentry
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -36,6 +37,7 @@ class TestReceiver : BroadcastReceiver() {
         const val ACTION_APPS = "com.sentry.debug.APPS"
         const val ACTION_WHO = "com.sentry.debug.WHO"
         const val ACTION_REACH = "com.sentry.debug.REACH"
+        const val ACTION_PLAN = "com.sentry.debug.PLAN"
 
         /** Long enough for a conversational answer from a small model. */
         const val TURN_TIMEOUT_MS = 90_000L
@@ -94,6 +96,17 @@ class TestReceiver : BroadcastReceiver() {
                     .filter { filter.isBlank() || it.label.lowercase().contains(filter) ||
                         it.packageName.lowercase().contains(filter) }
                     .forEach { Log.i(TAG, "  app: ${it.label}  [${it.packageName}]") }
+            }
+
+            ACTION_PLAN -> {
+                // What Sentry would do, without doing it. The only way to sweep the
+                // whole action surface at three in the morning: "play something on
+                // Spotify" is a fine thing to check and a terrible thing to run.
+                val text = intent.getStringExtra("text").orEmpty()
+                val translated = container.phrases.translate(text)
+                val command = FastMatcher.match(translated)
+                val note = if (translated != text) "  (heard as \"$translated\")" else ""
+                Log.i(TAG, "plan \"$text\"$note -> ${command ?: "no fast match; would ask the model"}")
             }
 
             ACTION_REACH -> {

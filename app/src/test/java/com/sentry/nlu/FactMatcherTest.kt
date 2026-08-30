@@ -93,4 +93,30 @@ class FactMatcherTest {
         assertEquals("Pranay", found[Fact.NAME])
         assertEquals("Rani", found[Fact.MOTHER])
     }
+
+    @Test
+    fun `being asked to remember is not being asked a question`() {
+        // "remember" has to count as a question opener — "do you remember", "remember
+        // when" — which meant the plainest way of stating a fact was the one shape
+        // that was always discarded.
+        assertEquals(
+            listOf(Fact.SIBLING to "Divya"),
+            FactMatcher.find("remember that my sister is Divya"),
+        )
+        assertEquals(
+            listOf(Fact.SIBLING to "Divya"),
+            FactMatcher.find("remember my sister is Divya"),
+        )
+        assertEquals(
+            listOf(Fact.BLOOD_GROUP to "O negative"),
+            FactMatcher.find("please note that my blood group is O negative"),
+        )
+    }
+
+    @Test
+    fun `a real question is still refused`() {
+        assertTrue(FactMatcher.find("do you remember my name").isEmpty())
+        assertTrue(FactMatcher.find("what is my sister's name").isEmpty())
+        assertTrue(FactMatcher.find("remember when we went to Goa").isEmpty())
+    }
 }
