@@ -229,9 +229,16 @@ things that should ask.
 
 ## Setup
 
+The speech models are not in this repository — three third-party binaries totalling
+about 140 MB, one of which ships no licence statement. Fetch them first:
+
 ```bash
+./scripts/fetch-models.sh     # ~140 MB, once
 ./gradlew :app:installDebug
 ```
+
+See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for what that downloads and
+under which licences.
 
 Open Sentry. The first screen is a checklist of the five things Android will not let an
 app arrange for itself, each with the one button that fixes it. Then turn on the wake

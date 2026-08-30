@@ -367,6 +367,16 @@ class VoiceEngine(private val context: Context) {
                 _ready.value = false
 
                 val target = File(context.filesDir, wanted.asset)
+                // The models are fetched rather than vendored, so "someone cloned the
+                // repo and built it" is a real state to report clearly instead of
+                // failing with a generic load error twenty seconds later.
+                if (!isBundled(wanted.asset)) {
+                    Log.e(TAG, "${wanted.asset} is not in assets — run scripts/fetch-models.sh")
+                    _events.tryEmit(
+                        Event.Failed("Speech model missing. Run scripts/fetch-models.sh and rebuild.")
+                    )
+                    return@runCatching false
+                }
                 if (!isUnpacked(target)) {
                     Log.i(TAG, "unpacking ${wanted.label}")
                     target.deleteRecursively()
@@ -434,6 +444,10 @@ class VoiceEngine(private val context: Context) {
      * Guards two different failures: an unpack interrupted by the process dying, and
      * an app update that ships a different model than the one already on disk.
      */
+    /** Whether this model was actually packaged into the APK. */
+    private fun isBundled(asset: String): Boolean =
+        runCatching { context.assets.list(asset)?.isNotEmpty() == true }.getOrDefault(false)
+
     private fun isUnpacked(target: File): Boolean =
         runCatching { File(target, ".complete").readText().trim() == MODEL_VERSION }
             .getOrDefault(false)

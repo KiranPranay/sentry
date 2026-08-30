@@ -16,3 +16,12 @@ local.properties
 
 # AI Models
 *.task
+
+# Speech models.
+#
+# Not in git: they are third-party binaries totalling ~140 MB, and one of them
+# (the Vosk speaker model) ships no licence statement at all. Fetch them with
+# scripts/fetch-models.sh — the app tells you if they are missing.
+/app/src/main/assets/model-en-us/
+/app/src/main/assets/model-en-in/
+/app/src/main/assets/model-spk/
