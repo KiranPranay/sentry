@@ -5,6 +5,7 @@ import android.content.Context
 import com.sentry.brain.Brains
 import com.sentry.core.Agent
 import com.sentry.data.Memory
+import com.sentry.data.NameBook
 import com.sentry.data.PhraseBook
 import com.sentry.data.VoiceProfile
 import com.sentry.data.Prefs
@@ -50,6 +51,7 @@ class Container(context: Context) {
     val phrases = PhraseBook(appContext)
     val voiceProfile = VoiceProfile(appContext)
     val memory = Memory(appContext)
+    val names = NameBook(appContext)
 
     val voice = VoiceEngine(appContext).apply {
         pack = prefs.speechPack
@@ -66,7 +68,7 @@ class Container(context: Context) {
 
     /** One index, shared: [Watchers] invalidates it and every lookup sees that. */
     val appsIndex = Apps(appContext)
-    private val skills = Skills(appContext, memory, appsIndex)
+    val skills = Skills(appContext, memory, appsIndex, names)
     private val planner = Planner(brains)
 
     val agent = Agent(skills, planner, brains, speaker, phrases, memory)

@@ -8,22 +8,37 @@ package com.sentry.skills
  * contacts this is what stands between "call maa" and a read-out list of everyone
  * whose name happens to contain those letters.
  */
+/**
+ * Who was found, and whether it is safe to act on without asking.
+ *
+ * Behaves as the list of matches everywhere a list was used before, and carries the
+ * one extra bit the caller genuinely needs: a single match is not the same thing as
+ * a sure match. "Call karma" finds exactly one contact — "Viswa Karma Industries" —
+ * and dialling it is worse than asking, because the user meant their mother.
+ */
+class Lookup(
+    private val matches: List<ContactMatch>,
+    val certain: Boolean,
+) : List<ContactMatch> by matches
+
 object ContactRanker {
 
     /** How far ahead the top match must be to be taken without asking. */
     private const val CLEAR_WINNER = 1.4f
 
-    /** Ranked candidates, best first. One element means "just do it". */
-    fun rank(candidates: List<ContactMatch>, query: String): List<ContactMatch> {
+    private val NOTHING = Lookup(emptyList(), certain = false)
+
+    /** Ranked candidates, best first. */
+    fun rank(candidates: List<ContactMatch>, query: String): Lookup {
         val needle = normalise(query)
-        if (needle.isEmpty()) return emptyList()
+        if (needle.isEmpty()) return NOTHING
 
         val ranked = candidates
             .map { it to score(normalise(it.name), needle) }
             .filter { it.second > 0 }
             .sortedByDescending { it.second }
 
-        if (ranked.isEmpty()) return emptyList()
+        if (ranked.isEmpty()) return NOTHING
 
         // A candidate far ahead of the rest is an answer, not a question. Asking
         // every time a short name matches several people is how an assistant becomes
@@ -31,10 +46,38 @@ object ContactRanker {
         val best = ranked[0]
         val runnerUp = ranked.getOrNull(1)
         if (runnerUp == null || best.second >= runnerUp.second * CLEAR_WINNER) {
-            return listOf(best.first)
+            return Lookup(listOf(best.first), sure(normalise(best.first.name), needle))
         }
 
-        return ranked.take(5).map { it.first }
+        return Lookup(ranked.take(5).map { it.first }, certain = false)
+    }
+
+    /**
+     * Whether the best match is the one the user meant, or merely the closest thing
+     * in the address book to a word the recogniser invented.
+     *
+     * Being alone in the results is no evidence at all — every wrong answer above is
+     * also alone. What counts is whether the spoken words actually account for the
+     * contact's name: said in full, said allowing for drawn-out spelling, said as the
+     * start of it, or covering at least half of it. A word buried in the middle of a
+     * longer name is a guess, and guesses get asked about rather than dialled.
+     */
+    private fun sure(name: String, needle: String): Boolean {
+        if (name == needle) return true
+        if (collapse(name) == collapse(needle)) return true
+        if (name.startsWith(needle)) return true
+        return covers(name, needle)
+    }
+
+    /** Whether the query explains at least half the words in the contact's name. */
+    private fun covers(name: String, needle: String): Boolean {
+        val nameWords = name.split(' ').filter { it.isNotBlank() }
+        if (nameWords.isEmpty()) return false
+        val needleWords = needle.split(' ').filter { it.isNotBlank() }
+        val matched = nameWords.count { word ->
+            needleWords.any { it == word || word.startsWith(it) || collapse(word) == collapse(it) }
+        }
+        return matched * 2 >= nameWords.size
     }
 
     private fun normalise(text: String): String =

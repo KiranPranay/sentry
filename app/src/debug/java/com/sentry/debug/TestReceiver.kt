@@ -34,6 +34,8 @@ class TestReceiver : BroadcastReceiver() {
         const val ACTION_LOOKUP = "com.sentry.debug.LOOKUP"
         const val ACTION_SPLIT = "com.sentry.debug.SPLIT"
         const val ACTION_APPS = "com.sentry.debug.APPS"
+        const val ACTION_WHO = "com.sentry.debug.WHO"
+        const val ACTION_REACH = "com.sentry.debug.REACH"
 
         /** Long enough for a conversational answer from a small model. */
         const val TURN_TIMEOUT_MS = 90_000L
@@ -94,6 +96,29 @@ class TestReceiver : BroadcastReceiver() {
                     .forEach { Log.i(TAG, "  app: ${it.label}  [${it.packageName}]") }
             }
 
+            ACTION_REACH -> {
+                // "--ez on false" before a test sweep, and nothing said to Sentry can
+                // ring a phone that belongs to someone else.
+                val on = intent.getBooleanExtra("on", true)
+                if (on) container.skills.reachOthers.allow() else container.skills.reachOthers.block()
+                Log.i(TAG, "reaching other people: ${if (on) "allowed" else "BLOCKED"}")
+            }
+
+            ACTION_WHO -> {
+                // Resolution only — deliberately never dispatches, so a name can be
+                // checked at three in the morning without a phone ringing anywhere.
+                val name = intent.getStringExtra("name").orEmpty()
+                val found = container.skills.findPerson(name)
+                if (found.isEmpty()) {
+                    Log.i(TAG, "who \"$name\" -> nobody")
+                } else {
+                    val verdict = if (found.certain) "certain" else "unsure"
+                    found.forEach {
+                        Log.i(TAG, "who \"$name\" [$verdict] -> ${it.name} (${it.number}) ${it.label}")
+                    }
+                }
+            }
+
             ACTION_DUMP -> {
                 Log.i(TAG, "=== transcript ===")
                 container.agent.transcript.value.forEach {
@@ -102,6 +127,14 @@ class TestReceiver : BroadcastReceiver() {
                 Log.i(TAG, "=== learned phrases ===")
                 container.phrases.all().forEach { (heard, meant) ->
                     Log.i(TAG, "  \"$heard\" -> \"$meant\"")
+                }
+                Log.i(TAG, "=== learned names ===")
+                container.names.all().forEach { (spoken, contact) ->
+                    Log.i(TAG, "  \"$spoken\" -> $contact")
+                }
+                Log.i(TAG, "=== memory ===")
+                container.memory.all().forEach {
+                    Log.i(TAG, "  ${it.fact.name} = ${it.value}  (${it.source})")
                 }
                 Log.i(TAG, "=== voice profile ===")
                 Log.i(TAG, "  samples=${container.voiceProfile.sampleCount} " +

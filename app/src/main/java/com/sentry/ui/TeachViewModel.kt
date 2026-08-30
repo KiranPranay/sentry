@@ -55,6 +55,15 @@ class TeachViewModel(application: Application) : AndroidViewModel(application) {
 
     val learned = MutableStateFlow(container.phrases.all())
 
+    /**
+     * Names picked up from ordinary use rather than taught here.
+     *
+     * They belong on this screen even though nothing on it created them: they are
+     * rewrites the user never explicitly approved, and a rewrite the user cannot see
+     * is one they cannot undo when it turns out to be wrong.
+     */
+    val learnedNames = MutableStateFlow(container.names.all())
+
     private var listenJob: Job? = null
 
     init {
@@ -162,6 +171,11 @@ class TeachViewModel(application: Application) : AndroidViewModel(application) {
         container.phrases.forget(heard)
         learned.value = container.phrases.all()
         container.refreshBias()
+    }
+
+    fun forgetName(spoken: String) {
+        container.names.forget(spoken)
+        learnedNames.value = container.names.all()
     }
 
     fun reset() {

@@ -83,6 +83,7 @@ private fun TeachScreen(
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val learned by viewModel.learned.collectAsStateWithLifecycle()
+    val learnedNames by viewModel.learnedNames.collectAsStateWithLifecycle()
 
     Column(
         modifier = modifier
@@ -275,6 +276,38 @@ private fun TeachScreen(
                             Text("“$heard”  →  “$meant”")
                         }
                         TextButton(onClick = { viewModel.forget(heard) }) { Text("Forget") }
+                    }
+                }
+            }
+        }
+
+        if (learnedNames.isNotEmpty()) {
+            Spacer(Modifier.height(28.dp))
+            Text("Names picked up on their own", fontWeight = FontWeight.Medium)
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Learned when you chose a contact from a list. Forget one if it " +
+                    "starts sending you to the wrong person.",
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(8.dp))
+
+            learnedNames.forEach { (spoken, contact) ->
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 8.dp),
+                ) {
+                    Row(
+                        Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Text("“$spoken”  →  $contact", Modifier.weight(1f))
+                        TextButton(onClick = { viewModel.forgetName(spoken) }) { Text("Forget") }
                     }
                 }
             }

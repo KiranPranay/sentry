@@ -18,6 +18,9 @@ data class ContactMatch(val name: String, val number: String, val label: String 
 /** Contacts to bias recognition towards. Beyond this the grammar costs more than it gives. */
 private const val MAX_BIAS_NAMES = 80
 
+/** A spoken list longer than this stops being a question and becomes a recitation. */
+private const val MAX_OFFERED = 5
+
 /**
  * Finding the person the user meant.
  *
@@ -38,11 +41,11 @@ class Contacts(private val context: Context) {
      * Numbers for the same person are collapsed, because "which of Mum's three
      * numbers" is a question the user should only be asked when it matters.
      */
-    fun find(query: String): List<ContactMatch> {
-        if (!hasPermission() || query.isBlank()) return emptyList()
+    fun find(query: String): Lookup {
+        if (!hasPermission() || query.isBlank()) return Lookup(emptyList(), certain = false)
 
         val rows = queryContacts(query)
-        if (rows.isEmpty()) return emptyList()
+        if (rows.isEmpty()) return Lookup(emptyList(), certain = false)
 
         // One row per person for ranking. Which of their numbers to use is a
         // separate question, answered below only if it turns out to matter.
@@ -58,7 +61,9 @@ class Contacts(private val context: Context) {
             val numbers = rows
                 .filter { it.name.equals(ranked[0].name, ignoreCase = true) }
                 .distinctBy { it.number.filter(Char::isDigit) }
-            if (numbers.size > 1) return numbers
+            // Still the same certainty: which of Maa's two numbers to ring is a
+            // different question from whether Maa is who was meant.
+            if (numbers.size > 1) return Lookup(numbers, ranked.certain)
         }
         return ranked
     }
@@ -103,6 +108,47 @@ class Contacts(private val context: Context) {
             }
         }
         return names.distinct()
+    }
+
+    /**
+     * The people the user has starred, as callable matches.
+     *
+     * Used when a spoken name matches nobody at all. "Karma" cannot be fuzzy-matched
+     * to "Maa" by any amount of string work — the recogniser replaced the word, it
+     * did not misspell it — so the only honest move left is to ask. Starred contacts
+     * are the right list to ask from: they are short, and the people someone calls by
+     * voice are overwhelmingly the people they have starred.
+     */
+    fun starred(limit: Int = MAX_OFFERED): List<ContactMatch> {
+        if (!hasPermission()) return emptyList()
+
+        val matches = mutableListOf<ContactMatch>()
+        runCatching {
+            context.contentResolver.query(
+                ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+                arrayOf(
+                    ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
+                    ContactsContract.CommonDataKinds.Phone.NUMBER,
+                ),
+                "${ContactsContract.CommonDataKinds.Phone.STARRED} = 1",
+                null,
+                "${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} ASC",
+            )?.use { cursor ->
+                val nameColumn = cursor.getColumnIndex(
+                    ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME
+                )
+                val numberColumn = cursor.getColumnIndex(
+                    ContactsContract.CommonDataKinds.Phone.NUMBER
+                )
+                if (nameColumn < 0 || numberColumn < 0) return@use
+                while (cursor.moveToNext()) {
+                    val name = cursor.getString(nameColumn) ?: continue
+                    val number = cursor.getString(numberColumn) ?: continue
+                    matches.add(ContactMatch(name, number))
+                }
+            }
+        }
+        return matches.distinctBy { it.name.lowercase() }.take(limit)
     }
 
     private fun queryContacts(query: String): List<ContactMatch> {

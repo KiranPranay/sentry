@@ -1,6 +1,7 @@
 package com.sentry.skills
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -93,5 +94,45 @@ class ContactRankerTest {
     fun `a blank query matches nobody`() {
         assertTrue(ContactRanker.rank(contacts("Ravi"), "").isEmpty())
         assertTrue(ContactRanker.rank(contacts("Ravi"), "   ").isEmpty())
+    }
+
+    // ----------------------------------------------------------- certainty
+
+    @Test
+    fun `a word buried in a longer name is not certain`() {
+        // The real address book on the test phone. "Call maa" comes back from the
+        // recogniser as "karma", and this is the only contact that matches it —
+        // so being the sole result is no evidence whatsoever that it is right.
+        val result = ContactRanker.rank(contacts("Viswa Karma Industries"), "karma")
+        assertEquals(1, result.size)
+        assertFalse(
+            "a business name matched on its middle word must not be dialled outright",
+            result.certain,
+        )
+    }
+
+    @Test
+    fun `a name said in full is certain`() {
+        assertTrue(ContactRanker.rank(contacts("Chinni"), "chinni").certain)
+        assertTrue(ContactRanker.rank(contacts("My Life"), "my life").certain)
+    }
+
+    @Test
+    fun `affectionate spelling is still certain`() {
+        // Squashed to the same word, so there is nothing to be unsure about.
+        assertTrue(ContactRanker.rank(contacts("Maaaaaaa"), "maa").certain)
+    }
+
+    @Test
+    fun `a first name or a surname of a two-part name is certain`() {
+        // Half the name is enough: "call kumar" for "Ravi Kumar" is not a guess.
+        assertTrue(ContactRanker.rank(contacts("Ravi Kumar"), "kumar").certain)
+        assertTrue(ContactRanker.rank(contacts("Krupa Rani"), "krupa").certain)
+    }
+
+    @Test
+    fun `several plausible candidates are never certain`() {
+        val result = ContactRanker.rank(contacts("Kumar Reddy", "Kumar Swamy"), "kumar")
+        assertFalse(result.certain)
     }
 }

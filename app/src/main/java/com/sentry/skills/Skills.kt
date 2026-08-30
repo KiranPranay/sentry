@@ -32,6 +32,7 @@ import com.sentry.core.Panel
 import com.sentry.core.Provider
 import com.sentry.data.Fact
 import com.sentry.data.Memory
+import com.sentry.data.NameBook
 import com.sentry.core.Reply
 import com.sentry.service.ScreenshotService
 import com.sentry.core.VolumeChange
@@ -55,6 +56,11 @@ class Skills(
      * list it captured at startup.
      */
     private val apps: Apps,
+    /**
+     * Written to whenever the user resolves an ambiguous name, which is the only
+     * moment Sentry is ever told, for free, what a mangled word actually meant.
+     */
+    private val names: NameBook,
 ) {
 
     private companion object {
@@ -68,9 +74,28 @@ class Skills(
          * a number already carrying a "+" is left exactly as it is.
          */
         const val DEFAULT_COUNTRY_CODE = "91"
+
+        /** A spoken list longer than this stops being a question and becomes a recitation. */
+        const val MAX_CHOICES = 5
+
+        /** People Sentry may have been told about, in the order it should guess them. */
+        val FAMILY = listOf(Fact.MOTHER, Fact.FATHER, Fact.SPOUSE, Fact.SIBLING)
     }
 
     private val contacts = Contacts(context)
+
+    /**
+     * A stop on anything that reaches another person.
+     *
+     * Exists because testing a voice assistant means saying "call maa" to it, and a
+     * command that works rings a real phone belonging to someone who did not ask to
+     * be part of the test. Four such calls went out during one night of development,
+     * two of them after midnight. Care was not enough; a switch is.
+     *
+     * Off in normal use — nothing in the release build ever sets it — so an assistant
+     * that cannot call anyone is a state only a test can put it in.
+     */
+    val reachOthers = OutboundGuard()
 
     /** What was last offered as a numbered list, so "the second one" can resolve. */
     private var pendingChoices: List<ContactMatch> = emptyList()
@@ -78,12 +103,21 @@ class Skills(
     /** What to do with a choice once it is made. */
     private var pendingAction: ((ContactMatch) -> Reply)? = null
 
+    /**
+     * The words that produced the list, kept so the answer can be learned from.
+     *
+     * Without this the pick is thrown away and Sentry asks the same question
+     * tomorrow, which is the behaviour that makes an assistant feel stupid.
+     */
+    private var pendingQuery: String = ""
+
     fun run(command: Command): Reply {
         // Any command that is not a selection invalidates a stale list; otherwise a
         // "second one" said minutes later would call whoever happened to be cached.
         if (command !is Command.Choose) {
             pendingChoices = emptyList()
             pendingAction = null
+            pendingQuery = ""
         }
 
         return runCatching { dispatch(command) }
@@ -214,8 +248,12 @@ class Skills(
      * mother is Rani may still have her saved in the phone as "Maa", and refusing to
      * fall back would make remembering a fact *worse* than not knowing it.
      */
-    private fun findPerson(query: String): List<ContactMatch> {
+    internal fun findPerson(query: String): Lookup {
         val candidates = buildList {
+            // What a previous pick taught, first: it is the most specific thing
+            // Sentry knows about this exact mis-hearing, and it was learned from
+            // this user rather than guessed.
+            names.resolve(query)?.let { add(it) }
             relationFact(query)?.let { fact -> memory[fact]?.let { add(it) } }
             add(query)
         }
@@ -226,7 +264,7 @@ class Skills(
                 return found
             }
         }
-        return emptyList()
+        return Lookup(emptyList(), certain = false)
     }
 
     private fun call(query: String): Reply {
@@ -234,19 +272,83 @@ class Skills(
             return needsPermission("I need permission to see your contacts and place calls.")
         }
 
-        val matches = findPerson(query)
-        return when {
-            matches.isEmpty() -> Reply("I couldn't find anyone called $query.")
-            matches.size == 1 -> placeCall(matches[0].number, matches[0].name)
-            else -> {
-                pendingChoices = matches
-                pendingAction = { placeCall(it.number, it.name) }
-                Reply.ask(
-                    question(matches),
-                    matches.map { it.spoken },
-                )
-            }
-        }
+        val found = findPerson(query)
+        if (found.size == 1 && found.certain) return placeCall(found[0].number, found[0].name)
+
+        val offer = offerFor(query, found)
+        if (offer.isEmpty()) return Reply("I couldn't find anyone called $query.")
+
+        return offerChoice(
+            query = query,
+            matches = offer,
+            question = questionFor(query, found, offer),
+            action = { placeCall(it.number, it.name) },
+        )
+    }
+
+    /**
+     * The list to put in front of the user when the name did not resolve outright.
+     *
+     * A confident-but-multiple result is a real choice between real candidates and is
+     * left alone. Anything else — nothing found, or one unconvincing match — gets the
+     * starred contacts folded in, because the person the user meant is very likely
+     * among them and otherwise has no way of reaching the list at all.
+     */
+    private fun offerFor(query: String, found: Lookup): List<ContactMatch> {
+        if (found.certain && found.isNotEmpty()) return found
+        return (found + rescue(query))
+            .distinctBy { it.number.filter(Char::isDigit) }
+            .take(MAX_CHOICES)
+    }
+
+    private fun questionFor(query: String, found: Lookup, offer: List<ContactMatch>): String = when {
+        found.certain && found.isNotEmpty() -> question(offer)
+        found.isEmpty() -> "I don't have anyone called $query. Did you mean one of these?"
+        else -> "I'm not sure you meant ${found[0].name}. Which one?"
+    }
+
+    /**
+     * What to offer when a spoken name matched nobody.
+     *
+     * The alternative is "I couldn't find anyone called karma", which is both true
+     * and useless: the user knows who they meant, and Sentry has thrown away the one
+     * chance it had to find out. Offering the starred contacts turns a dead end into
+     * the only supervised example this system will ever get for free.
+     *
+     * Only for short queries. "Call the plumber I saw on Tuesday" matching nothing is
+     * not a mis-hearing to be rescued, and reciting five names at it would be noise.
+     */
+    private fun rescue(query: String): List<ContactMatch> {
+        if (query.trim().split(' ').size > 2) return emptyList()
+
+        // Family first. Starred contacts are alphabetical and there are a dozen of
+        // them, so on this phone "Maa" falls outside the top five and the one person
+        // the user was most likely asking for never reaches the list. Anyone Sentry
+        // has been told about by name is a better guess than anyone it has not.
+        val family = FAMILY.mapNotNull { memory[it] }
+            .flatMap { name -> contacts.find(name).take(1) }
+
+        return (family + contacts.starred())
+            .distinctBy { it.number.filter(Char::isDigit) }
+            .take(MAX_CHOICES)
+    }
+
+    /**
+     * Offer a list and remember enough to learn from the answer.
+     *
+     * Every path that asks "which one?" goes through here, so there is no way to add
+     * a new one that forgets to record what was asked.
+     */
+    private fun offerChoice(
+        query: String,
+        matches: List<ContactMatch>,
+        question: String,
+        action: (ContactMatch) -> Reply,
+    ): Reply {
+        pendingChoices = matches
+        pendingAction = action
+        pendingQuery = query
+        return Reply.ask(question, matches.map { it.spoken })
     }
 
     /**
@@ -268,6 +370,10 @@ class Skills(
     private fun placeCall(number: String, who: String): Reply {
         if (!has(Manifest.permission.CALL_PHONE)) {
             return needsPermission("I need permission to place calls.")
+        }
+        if (reachOthers.blocked) {
+            Log.i(TAG, "would call $who ($number)")
+            return Reply("I would call $who, but reaching people is switched off.")
         }
         val intent = Intent(Intent.ACTION_CALL, Uri.parse("tel:$number"))
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -306,16 +412,20 @@ class Skills(
         if (!contacts.hasPermission()) {
             return needsPermission("I need permission to see your contacts.")
         }
-        val matches = findPerson(command.query)
-        return when {
-            matches.isEmpty() -> Reply("I couldn't find anyone called ${command.query}.")
-            matches.size == 1 -> compose(matches[0], command.body, command.channel)
-            else -> {
-                pendingChoices = matches
-                pendingAction = { compose(it, command.body, command.channel) }
-                Reply.ask(question(matches), matches.map { it.spoken })
-            }
+        val found = findPerson(command.query)
+        if (found.size == 1 && found.certain) {
+            return compose(found[0], command.body, command.channel)
         }
+
+        val offer = offerFor(command.query, found)
+        if (offer.isEmpty()) return Reply("I couldn't find anyone called ${command.query}.")
+
+        return offerChoice(
+            query = command.query,
+            matches = offer,
+            question = questionFor(command.query, found, offer),
+            action = { compose(it, command.body, command.channel) },
+        )
     }
 
     /**
@@ -689,9 +799,45 @@ class Skills(
         if (position !in choices.indices) {
             return Reply.ask("That wasn't on the list. Which one?", choices.map { it.spoken })
         }
+        val chosen = choices[position]
+        learnFrom(pendingQuery, chosen)
+
         pendingChoices = emptyList()
         pendingAction = null
-        return action(choices[position])
+        pendingQuery = ""
+        return action(chosen)
+    }
+
+    /**
+     * Take the lesson out of a pick.
+     *
+     * Two different things can be learned here and they are not interchangeable.
+     * "Call mom" resolving to a contact is a *fact about the user's family*, and it
+     * belongs in memory where they can read it and correct it. "Call karma"
+     * resolving to Maa is a fact about the *recogniser* — nothing about the user is
+     * revealed by it — and it belongs in the name book.
+     *
+     * Both are best-effort. A pick that teaches nothing is still a pick that worked,
+     * so nothing here is allowed to turn a successful call into an error.
+     */
+    private fun learnFrom(query: String, chosen: ContactMatch) {
+        if (query.isBlank()) return
+        runCatching {
+            val relation = relationFact(query)
+            if (relation != null) {
+                // Only when nothing is on file. Overwriting a stated fact with an
+                // inference from one tap would be Sentry deciding it knows the
+                // user's family better than they do.
+                if (memory[relation] == null) {
+                    memory.remember(relation, chosen.name, source = "you picked $query")
+                    Log.i(TAG, "learned ${relation.name} = ${chosen.name} from a choice")
+                }
+                return@runCatching
+            }
+            if (names.bind(query, chosen.name)) {
+                Log.i(TAG, "\"$query\" now means ${chosen.name}")
+            }
+        }.onFailure { Log.w(TAG, "could not learn from choice", it) }
     }
 
     // -------------------------------------------------------------- helpers

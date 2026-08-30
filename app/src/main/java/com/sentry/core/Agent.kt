@@ -360,7 +360,8 @@ class Agent(
     /** Say a finished reply and record it. */
     private suspend fun respond(reply: Reply) {
         if (reply.speech.isBlank()) return
-        Log.i(TAG, "reply: \"${reply.speech}\"")
+        Log.i(TAG, "reply: \"${reply.speech}\"" +
+            if (reply.choices.isEmpty()) "" else " ${reply.choices}")
         addTurn(Party.SENTRY, reply.speech, chip = reply.chip, isError = reply.isError)
 
         _status.value = Status.SPEAKING
