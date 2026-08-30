@@ -73,6 +73,11 @@ class EnrollViewModel(application: Application) : AndroidViewModel(application) 
 
     private val _state = MutableStateFlow(
         State(
+            // Reflect the profile that is already on disk. Without this, reopening
+            // the screen after enrolling showed the "read this out" flow again, as
+            // though nothing had been learned — `saved` meant "saved during this
+            // visit" where the screen needed "enrolled at all".
+            saved = profile.isEnrolled,
             enforce = profile.enforce,
             enrolledCount = profile.sampleCount,
             spread = profile.selfConsistency(),
