@@ -40,6 +40,29 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         /** How long after TTS reports "done" the speaker is still making noise. */
         const val SPEECH_HANGOVER_MS = 700L
 
+        /**
+         * How long the session survives with nothing said.
+         *
+         * Generous on purpose. The microphone being open is visible — the orb is lit
+         * and the status line says so — and pausing to think mid-conversation is
+         * normal. Closing the screen while someone is deciding what to say is the
+         * failure this replaces.
+         */
+        const val SESSION_IDLE_MS = 45_000L
+
+        /** Breath between a failed capture and reopening, so the two do not thrash. */
+        const val RETRY_DELAY_MS = 250L
+
+        /**
+         * Longest a single session may run, however busy it looks.
+         *
+         * The idle budget alone is not a bound: in a room with a television or a
+         * conversation in it, stray speech keeps resetting it and the microphone
+         * stays open forever. Checked only at a turn boundary, so it can never cut
+         * somebody off mid-sentence — it just declines to start another round.
+         */
+        const val SESSION_MAX_MS = 5 * 60 * 1000L
+
     }
 
     private val container: Container = application.sentry
@@ -87,6 +110,14 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     @Volatile
     private var ended = false
 
+    /** When the user last did something. The idle budget counts from here. */
+    @Volatile
+    private var lastInteractionAt = 0L
+
+    /** When this session opened, for the hard cap. */
+    @Volatile
+    private var startedAt = 0L
+
     init {
         viewModelScope.launch {
             voice.events.collect { event ->
@@ -100,16 +131,13 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                             onHeard(event.text)
                         } else {
                             Log.i(TAG, "ignoring \"${event.text}\": not the enrolled voice")
-                            agent.setListening(false)
+                            // Somebody spoke, just not the enrolled user. Keep the
+                            // session up rather than dropping it on the floor.
+                            onNothingHeard(heardSomething = true)
                         }
                     }
 
-                    // Silence is how a conversation ends. Anything else would leave
-                    // the microphone open indefinitely after the user walked away.
-                    is VoiceEngine.Event.NoSpeech -> {
-                        agent.setListening(false)
-                        if (agent.transcript.value.isNotEmpty()) finish()
-                    }
+                    is VoiceEngine.Event.NoSpeech -> onNothingHeard(event.heardSomething)
                     // Not handled here on purpose. The wake word is the hotword
                     // service's to act on, and it opens this screen, which starts
                     // listening in onCreate/onNewIntent. Doing it here as well meant
@@ -164,6 +192,8 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun startSession(listenImmediately: Boolean) {
         ended = false
+        lastInteractionAt = System.currentTimeMillis()
+        startedAt = lastInteractionAt
         // Carry the conversation over when the user comes straight back: "who wrote
         // Dune" followed a moment later by "when did he die" should still work. After
         // a real gap it starts clean, because stale context is worse than none.
@@ -191,7 +221,48 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         onHeard(text)
     }
 
+    /**
+     * A capture that produced nothing to act on.
+     *
+     * The old rule was "any silence ends the conversation", which closed the screen
+     * out from under the user for a pause of six seconds — or for one sentence said
+     * a little too quietly, since a rejected utterance arrived here too. It also had
+     * the opposite failure: a session where nothing had *ever* been said stayed open
+     * forever with the microphone live.
+     *
+     * The session now runs on an idle budget instead. Every real exchange resets it;
+     * silence only ends things once the whole budget has gone, which is what "idle
+     * for too long" should have meant all along.
+     */
+    private fun onNothingHeard(heardSomething: Boolean) {
+        val idleFor = System.currentTimeMillis() - lastInteractionAt
+        Log.d(TAG, "nothing heard (spoke=$heardSomething, ended=$ended, idle=${idleFor}ms)")
+        if (ended) return
+        agent.setListening(false)
+        if (idleFor >= SESSION_IDLE_MS) {
+            Log.i(TAG, "closing after ${idleFor / 1000}s idle")
+            finish()
+            return
+        }
+
+        // Someone talking and not being understood should never shorten the session,
+        // so their attempt counts as activity.
+        if (heardSomething) lastInteractionAt = System.currentTimeMillis()
+
+        viewModelScope.launch {
+            delay(RETRY_DELAY_MS)
+            // No "is it already listening?" guard here, deliberately. The capture
+            // that just failed is still unwinding — releasing the recorder and
+            // closing three recognisers — so it still looks live for a moment, and
+            // checking made the retry skip itself and the session hang with a dead
+            // microphone. startCommand() serialises on the engine's own lock and
+            // joins the outgoing job, so calling it unconditionally is the safe form.
+            if (!ended) startListening()
+        }
+    }
+
     private fun onHeard(text: String) {
+        lastInteractionAt = System.currentTimeMillis()
         handling?.cancel()
         handling = viewModelScope.launch {
             // Reopen the microphone *before* answering, not after. This is what lets

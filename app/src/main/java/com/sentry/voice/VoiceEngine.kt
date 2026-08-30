@@ -204,7 +204,14 @@ class VoiceEngine(private val context: Context) {
 
         /** The user started talking while Sentry was. Stop talking and listen. */
         data object BargeIn : Event
-        data object NoSpeech : Event
+        /**
+         * This capture produced nothing usable.
+         *
+         * [heardSomething] separates "the room was silent" from "they spoke and we
+         * threw it away" — a rejected utterance means the user is right there and
+         * expecting an answer, which is the worst possible moment to give up.
+         */
+        data class NoSpeech(val heardSomething: Boolean) : Event
         data class Failed(val reason: String) : Event
         data object ModelReady : Event
     }
@@ -778,13 +785,15 @@ class VoiceEngine(private val context: Context) {
                             (print?.let { " [voice ${it.frames}f]" } ?: ""))
                         _events.tryEmit(Event.Transcript(best, print))
                     } else {
-                        _events.tryEmit(Event.NoSpeech)
+                        // Blank, or too quiet to trust. Either way somebody was
+                        // probably talking, so say so.
+                        _events.tryEmit(Event.NoSpeech(heardAnything))
                     }
                     return@withContext
                 }
                 if (gaveUp) {
                     _partial.value = ""
-                    _events.tryEmit(Event.NoSpeech)
+                    _events.tryEmit(Event.NoSpeech(heardSomething = false))
                     return@withContext
                 }
             }
