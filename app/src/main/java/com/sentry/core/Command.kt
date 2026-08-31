@@ -64,6 +64,20 @@ sealed interface Command {
     data object BrightnessQuery : Command
 
     /**
+     * A level command whose direction did not survive the recogniser.
+     *
+     * "Jellyfish the volume" names the thing to change and nothing else. The word in
+     * [heard] is whatever the recogniser produced where a verb should have been, and
+     * it is deliberately not guessed at: the phonetic codes put "jellyfish" closer to
+     * "decrease" than to "increase" — and one letter from "max" — so a matcher
+     * confident enough to act on it would set the volume to maximum on a mis-hearing.
+     *
+     * Asking costs one short question, once. The answer is remembered against the
+     * word that was heard, so the same mis-hearing resolves silently ever after.
+     */
+    data class WhichWay(val target: LevelTarget, val heard: String) : Command
+
+    /**
      * The ringer, which is neither the media volume nor Do Not Disturb.
      *
      * "Keep the device in silent" reached the conversation tier, which said "Ok, I'll
@@ -147,6 +161,9 @@ enum class Channel(val label: String, val packageName: String?) {
  * keeps its own type because it has a state the others do not — muted is not the same
  * as zero, and a screen cannot be muted.
  */
+/** Which of the two things with a level the user meant. */
+enum class LevelTarget { SOUND, SCREEN }
+
 sealed interface LevelChange {
     data object Up : LevelChange
     data object Down : LevelChange
@@ -215,7 +232,9 @@ val Command.commit: Commit
         is Command.Calculate, is Command.Chat,
         // Reading a level back changes nothing, which is exactly why the fast path
         // is allowed to accept a shape it would otherwise have to refuse.
-        is Command.VolumeQuery, is Command.BrightnessQuery -> Commit.PURE
+        is Command.VolumeQuery, is Command.BrightnessQuery,
+        // Asking which way changes nothing; the answer is a separate turn.
+        is Command.WhichWay -> Commit.PURE
 
         // Writes a file and flashes the screen, but replaces nothing and harms
         // nothing if it happens twice.

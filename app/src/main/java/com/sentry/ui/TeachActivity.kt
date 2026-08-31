@@ -84,6 +84,7 @@ private fun TeachScreen(
     val state by viewModel.state.collectAsStateWithLifecycle()
     val learned by viewModel.learned.collectAsStateWithLifecycle()
     val learnedNames by viewModel.learnedNames.collectAsStateWithLifecycle()
+    val learnedVerbs by viewModel.learnedVerbs.collectAsStateWithLifecycle()
 
     Column(
         modifier = modifier
@@ -308,6 +309,38 @@ private fun TeachScreen(
                     ) {
                         Text("“$spoken”  →  $contact", Modifier.weight(1f))
                         TextButton(onClick = { viewModel.forgetName(spoken) }) { Text("Forget") }
+                    }
+                }
+            }
+        }
+
+        if (learnedVerbs.isNotEmpty()) {
+            Spacer(Modifier.height(28.dp))
+            Text("Words you told Sentry the meaning of", fontWeight = FontWeight.Medium)
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "When Sentry hears a volume or brightness command but not which way, " +
+                    "it asks once and remembers your answer.",
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(8.dp))
+
+            learnedVerbs.forEach { (spoken, verb) ->
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 8.dp),
+                ) {
+                    Row(
+                        Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Text("\u201C$spoken\u201D  \u2192  $verb", Modifier.weight(1f))
+                        TextButton(onClick = { viewModel.forgetVerb(spoken) }) { Text("Forget") }
                     }
                 }
             }

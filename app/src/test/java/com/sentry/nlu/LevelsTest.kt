@@ -2,6 +2,7 @@ package com.sentry.nlu
 
 import com.sentry.core.Command
 import com.sentry.core.LevelChange
+import com.sentry.core.LevelTarget
 import com.sentry.core.VolumeChange
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -106,7 +107,7 @@ class LevelsTest {
     fun `a noun in ordinary speech is not a command`() {
         listOf(
             "high volume", "low volume", "trading volume", "blood volume",
-            "the trading volume", "the volume of the box", "a large volume of water",
+            "the volume of the box", "a large volume of water",
             "the movie was silent", "the screen is cracked", "my screen is broken",
             "the display is fine", "check the volume of the trade",
             "turn the page", "the sound of music",
@@ -114,10 +115,79 @@ class LevelsTest {
     }
 
     @Test
-    fun `an unexplained word is refused rather than ignored`() {
-        // A parser that drops what it cannot account for will act on half a sentence.
-        assertNull(match("jellyfish the volume"))
-        assertNull(match("the jewish the volume percent"))
-        assertNull(match("prakash the volume"))
+    fun `a destroyed verb becomes a question, not a guess`() {
+        // The recogniser keeps the noun and loses the verb. Every phonetic code rates
+        // "jellyfish" closer to "decrease" than to "increase", and one step from
+        // "max", so the word is carried into the question rather than scored.
+        assertEquals(
+            Command.WhichWay(LevelTarget.SOUND, "jellyfish"),
+            match("jellyfish the volume"),
+        )
+        assertEquals(
+            Command.WhichWay(LevelTarget.SOUND, "jewish"),
+            match("the jewish the volume percent"),
+        )
+        assertEquals(
+            Command.WhichWay(LevelTarget.SCREEN, "jellyfish"),
+            match("jellyfish the brightness"),
+        )
+    }
+
+    @Test
+    fun `a contact name is not a mangled verb`() {
+        // "Prakash the volume" parses exactly like "jellyfish the volume" — one word
+        // the grammar cannot place, in front of a level noun. Nothing about the
+        // string distinguishes them, so the address book gets a veto.
+        try {
+            Levels.knownName = { it == "prakash" }
+            assertNull(FastMatcher.match("prakash the volume"))
+            // Still asks about a word that is nobody's name.
+            assertEquals(
+                Command.WhichWay(LevelTarget.SOUND, "jellyfish"),
+                FastMatcher.match("jellyfish the volume"),
+            )
+        } finally {
+            Levels.knownName = null
+        }
+    }
+
+    @Test
+    fun `a word the user has already answered for is not asked about twice`() {
+        try {
+            Levels.learnedVerb = { _, word -> if (word == "jellyfish") "increase" else null }
+            assertEquals(Command.Volume(VolumeChange.Up), FastMatcher.match("jellyfish the volume"))
+            assertEquals(
+                Command.Brightness(LevelChange.Up),
+                FastMatcher.match("jellyfish the brightness"),
+            )
+        } finally {
+            Levels.learnedVerb = null
+        }
+    }
+
+    @Test
+    fun `an inflected verb is still that verb`() {
+        // "Increase the device brightness" arrived as this, and both words were
+        // unplaceable: one carried an ending, the other was decoder noise.
+        assertEquals(
+            Command.Brightness(LevelChange.Up),
+            match("increased devised the brightness"),
+        )
+        assertEquals(Command.Volume(VolumeChange.Down), match("lowered the volume"))
+    }
+
+    @Test
+    fun `a noun phrase is never mistaken for a mangled command`() {
+        // These name a level and one other word, which is the same shape as a
+        // destroyed verb. Sentry must not ask "up or down?" at someone discussing the
+        // stock market.
+        listOf(
+            "high volume", "low volume", "trading volume", "blood volume",
+            "the trading volume", "the total volume", "a large volume",
+            "the average volume",
+        ).forEach {
+            val m = match(it)
+            if (m != null) throw AssertionError("\"$it\" should not match, was $m")
+        }
     }
 }

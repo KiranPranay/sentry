@@ -186,6 +186,15 @@ class Agent(
         // it happens before the reply, so an answer can already use what was learned.
         rememberFacts(stitched)
 
+        // An answer to a question Sentry asked comes first, because the words that
+        // answer one — "up", "down" — are deliberately not commands on their own and
+        // the matcher below is right to refuse them.
+        val answered = skills.answer(stitched)
+        if (answered != null) {
+            respond(answered)
+            return
+        }
+
         try {
             val fast = FastMatcher.match(stitched)
             if (fast != null) {

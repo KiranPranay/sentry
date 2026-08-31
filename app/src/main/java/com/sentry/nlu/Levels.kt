@@ -2,6 +2,7 @@ package com.sentry.nlu
 
 import com.sentry.core.Command
 import com.sentry.core.LevelChange
+import com.sentry.core.LevelTarget
 import com.sentry.core.VolumeChange
 
 /**
@@ -26,6 +27,28 @@ import com.sentry.core.VolumeChange
  * are not requests to change anything.
  */
 internal object Levels {
+
+    /**
+     * What the user has taught, injected rather than imported.
+     *
+     * This object is pure and has no Context, the same way [FastMatcher] is, so the
+     * store is handed in by the container as a one-way lookup — the same shape as
+     * VoiceEngine.preferHypothesis. Null in tests, which keeps them honest about what
+     * the grammar alone can do.
+     */
+    @Volatile
+    var learnedVerb: ((LevelTarget, String) -> String?)? = null
+
+    /**
+     * Whether a word is somebody's name or an app on this phone.
+     *
+     * A destroyed verb and a contact name occupy the same slot — "prakash the volume"
+     * parses exactly like "jellyfish the volume" — and only the address book can tell
+     * them apart. Injected for the same reason as [learnedVerb]: this object stays
+     * pure, and the tests see what the grammar alone can do.
+     */
+    @Volatile
+    var knownName: ((String) -> Boolean)? = null
 
     private enum class Domain { SOUND, SCREEN, RINGER }
 
@@ -160,34 +183,42 @@ internal object Levels {
         var act: Act? = null
         var acts = 0
         var offs = 0
+        var namedAt = -1
         val strays = mutableListOf<String>()
+        val strayAt = mutableListOf<Int>()
 
         // Amounts are taken out first: they are the only multi-word slot, and leaving
         // "to fifty percent" in the scan would produce three strays and a refusal.
         val amount = Amounts.take(words) ?: return null
 
-        for (word in amount.rest) {
+        for ((index, word) in amount.rest.withIndex()) {
             when {
                 word in FILLER -> Unit
                 word in OFF_WORDS -> offs++
-                DOMAINS.containsKey(word) -> {
+                DOMAINS.containsKey(stem(word)) -> {
+                    val word = stem(word)
                     val found = DOMAINS.getValue(word)
                     if (strong(word)) {
                         namedDomains.add(found)
                         if (named == null) {
                             named = found
                             namedWord = word
+                            namedAt = index
                         }
                     } else if (pronoun == null) {
                         pronoun = found
                     }
                 }
-                ACTS.containsKey(word) -> {
+                ACTS.containsKey(stem(word)) -> {
+                    val word = stem(word)
                     acts++
                     if (act == null) act = ACTS.getValue(word)
                     SELF_DOMAINING[word]?.let { own -> if (fromAct == null) fromAct = own }
                 }
-                else -> strays.add(word)
+                else -> {
+                    strays.add(word)
+                    strayAt.add(index)
+                }
             }
         }
 
@@ -197,8 +228,41 @@ internal object Levels {
         // Naming two different things, or the same thing twice, is not a command this
         // parser can be confident about. Neither is naming none, and neither is a word
         // it could not account for at all.
-        if (domain == null || namedDomains.size > 1 || acts > 1 || strays.isNotEmpty()) {
-            return null
+        if (domain == null || namedDomains.size > 1 || acts > 1) return null
+
+        // One word the parser could not place, in a sentence that otherwise names a
+        // level and nothing else. That is the shape of a command whose verb the
+        // recogniser destroyed — "jellyfish the volume" — so rather than dropping the
+        // word or guessing at it, ask which way and remember the answer.
+        if (strays.size > 1) return null
+
+        if (strays.size == 1) {
+            val stray = strays[0]
+            val target = named?.asTarget() ?: return null
+
+            // An imperative puts its verb before its object. A word after the noun is
+            // modifying it — "the volume of the box", "a large volume of water" —
+            // and is not a verb the recogniser mangled.
+            if (namedAt >= 0 && strayAt[0] > namedAt) return null
+
+            if (act != null || amount.value != null) {
+                // A direction is already known, so one unaccounted-for word is
+                // decoder noise — "increased *devised* the brightness" — and dropping
+                // it is safer than refusing a command that is otherwise complete. Not
+                // if it looks like an ordinary modifier, though: "turn up the trading
+                // volume" is somebody talking, not somebody asking.
+                if (!plausibleVerb(stray)) return null
+            } else {
+                // Nothing but the noun and one word that should have been a verb.
+                val taught = learnedVerb?.invoke(target, stray)
+                if (taught != null) {
+                    act = ACTS[taught]
+                } else if (worthAsking(stray, words.size)) {
+                    return Command.WhichWay(target, stray)
+                } else {
+                    return null
+                }
+            }
         }
 
         // "Turn it up" is a nudge and the pronoun is enough. "Set it to fifty" is not:
@@ -210,6 +274,68 @@ internal object Levels {
     }
 
     private const val MAX_WORDS = 9
+
+    private fun Domain.asTarget(): LevelTarget? = when (this) {
+        Domain.SOUND -> LevelTarget.SOUND
+        Domain.SCREEN -> LevelTarget.SCREEN
+        Domain.RINGER -> null
+    }
+
+    /**
+     * Whether an unplaced word is worth one short question.
+     *
+     * Asking is cheap and changes nothing, but an unsolicited "up or down?" while
+     * someone is talking about something else is still an interruption. So the
+     * sentence has to be short enough to be an instruction rather than a remark, and
+     * the word has to be substantial enough to have been a verb — a stray "of" or
+     * "and" is filler the recogniser added, not a command it mangled.
+     */
+    private fun worthAsking(stray: String, words: Int): Boolean =
+        words in 3..5 && stray.length >= 3 && plausibleVerb(stray)
+
+    /**
+     * Whether an unplaced word could have been a verb at all.
+     *
+     * "High volume", "trading volume" and "blood volume" are noun phrases, not
+     * mangled instructions, and the words in front of the noun are the giveaway.
+     * Refusing them here is what keeps Sentry from asking "up or down?" at somebody
+     * discussing the stock market.
+     */
+    private fun plausibleVerb(stray: String): Boolean =
+        stray !in NEVER_A_VERB &&
+            stray !in MODIFIERS &&
+            knownName?.invoke(stray) != true
+
+    private val MODIFIERS = setOf(
+        "high", "low", "loud", "quiet", "soft", "large", "small", "big", "huge",
+        "total", "trading", "blood", "average", "normal", "same", "different",
+        "good", "bad", "best", "worst", "new", "old", "whole", "half", "double",
+    )
+
+    /**
+     * Strip an ending the recogniser welded on.
+     *
+     * "Increased devised the brightness" was "increase the device brightness". The
+     * stems are all in the tables already, so this widens no vocabulary — it only
+     * lets a word that is already a verb be recognised when it arrives inflected.
+     */
+    private fun stem(word: String): String {
+        if (ACTS.containsKey(word) || DOMAINS.containsKey(word)) return word
+        for (suffix in listOf("ing", "ed", "es", "s", "d")) {
+            if (word.length > suffix.length + 2 && word.endsWith(suffix)) {
+                val root = word.removeSuffix(suffix)
+                if (ACTS.containsKey(root) || DOMAINS.containsKey(root)) return root
+            }
+        }
+        return word
+    }
+
+    private val NEVER_A_VERB = setOf(
+        "and", "but", "for", "with", "from", "into", "onto", "about", "over",
+        "not", "you", "your", "our", "his", "her", "its", "was", "were", "are",
+        "has", "had", "have", "can", "will", "would", "should", "could", "there",
+        "here", "when", "then", "than", "some", "any", "all", "one", "two",
+    )
 
     private fun build(
         domain: Domain,

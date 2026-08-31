@@ -32,7 +32,9 @@ import com.sentry.core.Panel
 import com.sentry.core.Provider
 import com.sentry.data.Fact
 import com.sentry.data.Memory
+import com.sentry.core.LevelTarget
 import com.sentry.data.NameBook
+import com.sentry.data.VerbBook
 import com.sentry.core.Reply
 import com.sentry.service.ScreenshotService
 import com.sentry.core.LevelChange
@@ -62,6 +64,8 @@ class Skills(
      * moment Sentry is ever told, for free, what a mangled word actually meant.
      */
     private val names: NameBook,
+    /** Directions the user has taught for words the recogniser mangles. */
+    private val verbs: VerbBook,
 ) {
 
     private companion object {
@@ -119,6 +123,8 @@ class Skills(
             pendingAction = null
             pendingQuery = ""
         }
+        // A second "which way?" replaces the first rather than stacking.
+        if (command !is Command.WhichWay) pendingWay = null
 
         return runCatching { dispatch(command) }
             .getOrElse {
@@ -152,6 +158,7 @@ class Skills(
         is Command.Brightness -> brightness(command.change)
         Command.BrightnessQuery -> brightnessQuery()
         is Command.Silent -> silent(command.on)
+        is Command.WhichWay -> whichWay(command)
         is Command.Dnd -> dnd(command.on)
         Command.OpenCamera -> openCamera()
         Command.BatteryStatus -> battery()
@@ -1045,6 +1052,101 @@ class Skills(
      * Returns null in normal use, so every caller is one line and the guard cannot be
      * left off a new skill by forgetting to wrap it in an if.
      */
+    // ------------------------------------------------------- which way?
+
+    /** A direction Sentry asked for and is waiting on. */
+    private var pendingWay: Command.WhichWay? = null
+
+    /**
+     * The words that answer "up or down?", and the verb each one stands for.
+     *
+     * Deliberately tiny. This runs on every utterance while a question is open, so
+     * anything it accepts is a word that cannot be said in passing without moving a
+     * level — and anything it does not accept simply cancels the question and is
+     * handled normally.
+     */
+    private val ANSWERS = mapOf(
+        "up" to "increase", "increase" to "increase", "higher" to "increase",
+        "raise" to "increase", "louder" to "increase", "brighter" to "increase",
+        "more" to "increase", "brighten" to "increase",
+        "down" to "decrease", "decrease" to "decrease", "lower" to "decrease",
+        "quieter" to "decrease", "softer" to "decrease", "dimmer" to "decrease",
+        "dim" to "decrease", "less" to "decrease", "darker" to "decrease",
+    )
+
+    private val DECLINED = setOf(
+        "neither", "nothing", "never mind", "nevermind", "cancel", "forget it",
+        "no", "none", "stop",
+    )
+
+    /**
+     * Sentry heard a level command with no direction in it.
+     *
+     * Reads the current level back as part of the question, because "up or down?" on
+     * its own is a worse question than "volume is at ninety-two percent — up or
+     * down?", and because it confirms Sentry understood which thing was meant.
+     */
+    private fun whichWay(command: Command.WhichWay): Reply {
+        pendingWay = command
+        val now = when (command.target) {
+            LevelTarget.SOUND -> currentVolumePercent()
+            LevelTarget.SCREEN -> currentBrightnessPercent()
+        }
+        val thing = if (command.target == LevelTarget.SOUND) "Volume" else "Brightness"
+        val preamble = if (now == null) "" else "$thing is at $now percent. "
+        return Reply.ask("${preamble}Up or down?", listOf("Up", "Down"))
+    }
+
+    /**
+     * Take the answer to a question Sentry asked, if this utterance is one.
+     *
+     * @return null when nothing was pending, or when the words are not an answer — in
+     *   which case the utterance is handled normally and the question is dropped,
+     *   because a user who says something else has moved on.
+     */
+    fun answer(text: String): Reply? {
+        val pending = pendingWay ?: return null
+        val words = text.lowercase().trim().trim('.', '!', '?')
+
+        if (words in DECLINED) {
+            pendingWay = null
+            return Reply("Alright, leaving it.")
+        }
+
+        // Only a bare direction counts. "Turn the volume up" is a whole command and
+        // should go through the matcher like any other, not be treated as an answer.
+        val verb = ANSWERS[words] ?: ANSWERS[words.removePrefix("the ")] ?: run {
+            pendingWay = null
+            return null
+        }
+        pendingWay = null
+
+        // The answer is the authority. Nothing here is a guess, which is the entire
+        // reason for asking rather than scoring.
+        verbs.bind(pending.target, pending.heard, verb)
+
+        val up = verb == "increase"
+        return when (pending.target) {
+            LevelTarget.SOUND ->
+                volume(if (up) VolumeChange.Up else VolumeChange.Down)
+            LevelTarget.SCREEN ->
+                brightness(if (up) LevelChange.Up else LevelChange.Down)
+        }
+    }
+
+    private fun currentVolumePercent(): Int? {
+        val audio = context.getSystemService(AudioManager::class.java) ?: return null
+        val max = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+        return percentOf(audio.getStreamVolume(AudioManager.STREAM_MUSIC), max)
+    }
+
+    private fun currentBrightnessPercent(): Int? = runCatching {
+        percentOf(
+            Settings.System.getInt(context.contentResolver, Settings.System.SCREEN_BRIGHTNESS),
+            BRIGHTNESS_MAX,
+        )
+    }.getOrNull()
+
     private fun percentOf(value: Int, max: Int): Int =
         if (max <= 0) 0 else Math.round(value * 100f / max).coerceIn(0, 100)
 

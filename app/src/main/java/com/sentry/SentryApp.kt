@@ -7,9 +7,11 @@ import com.sentry.core.Agent
 import com.sentry.data.Memory
 import com.sentry.data.NameBook
 import com.sentry.data.PhraseBook
-import com.sentry.data.VoiceProfile
 import com.sentry.data.Prefs
+import com.sentry.data.VerbBook
+import com.sentry.data.VoiceProfile
 import com.sentry.nlu.FastMatcher
+import com.sentry.nlu.Levels
 import com.sentry.nlu.Planner
 import com.sentry.skills.Apps
 import com.sentry.skills.Contacts
@@ -52,6 +54,7 @@ class Container(context: Context) {
     val voiceProfile = VoiceProfile(appContext)
     val memory = Memory(appContext)
     val names = NameBook(appContext)
+    val verbs = VerbBook(appContext)
 
     val voice = VoiceEngine(appContext).apply {
         pack = prefs.speechPack
@@ -60,6 +63,18 @@ class Container(context: Context) {
         // one-way predicate rather than a dependency.
         preferHypothesis = { FastMatcher.match(it) != null }
     }
+    init {
+        // The grammar is pure and has no Context, so what the user has taught it is
+        // injected rather than imported — the same one-way shape as preferHypothesis.
+        Levels.learnedVerb = { target, word -> verbs.resolve(target, word) }
+
+        // A contact's name sits in the same slot a destroyed verb would, so the
+        // address book gets a veto before Sentry asks "up or down?" about it.
+        Levels.knownName = { word ->
+            appsIndex.find(word) != null || contacts.find(word).certain
+        }
+    }
+
     val speaker = Speaker(appContext)
 
     val brains = Brains(appContext, prefs.backendPreference())
@@ -68,7 +83,7 @@ class Container(context: Context) {
 
     /** One index, shared: [Watchers] invalidates it and every lookup sees that. */
     val appsIndex = Apps(appContext)
-    val skills = Skills(appContext, memory, appsIndex, names)
+    val skills = Skills(appContext, memory, appsIndex, names, verbs)
     private val planner = Planner(brains)
 
     val agent = Agent(skills, planner, brains, speaker, phrases, memory)

@@ -64,6 +64,15 @@ class TeachViewModel(application: Application) : AndroidViewModel(application) {
      */
     val learnedNames = MutableStateFlow(container.names.all())
 
+    /**
+     * Directions learned from answering "up or down?".
+     *
+     * Same argument as the names: nobody approved these in a Teach screen, they were
+     * inferred from one answer, and a rewrite the user cannot see is one they cannot
+     * undo when it turns out to be wrong.
+     */
+    val learnedVerbs = MutableStateFlow(container.verbs.all())
+
     private var listenJob: Job? = null
 
     init {
@@ -176,6 +185,11 @@ class TeachViewModel(application: Application) : AndroidViewModel(application) {
     fun forgetName(spoken: String) {
         container.names.forget(spoken)
         learnedNames.value = container.names.all()
+    }
+
+    fun forgetVerb(spoken: String) {
+        container.verbs.forget(spoken)
+        learnedVerbs.value = container.verbs.all()
     }
 
     fun reset() {
