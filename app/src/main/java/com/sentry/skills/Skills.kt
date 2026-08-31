@@ -148,7 +148,10 @@ class Skills(
 
         is Command.Torch -> torch(command.on)
         is Command.Volume -> volume(command.change)
+        Command.VolumeQuery -> volumeQuery()
         is Command.Brightness -> brightness(command.change)
+        Command.BrightnessQuery -> brightnessQuery()
+        is Command.Silent -> silent(command.on)
         is Command.Dnd -> dnd(command.on)
         Command.OpenCamera -> openCamera()
         Command.BatteryStatus -> battery()
@@ -701,6 +704,18 @@ class Skills(
      * brightness override only dims Sentry's own screen, which is a convincing
      * imitation of working right up until the user leaves the app.
      */
+    private fun brightnessQuery(): Reply {
+        if (!Settings.System.canWrite(context)) {
+            // Reading needs no permission, so answer even when setting is not allowed.
+            Log.d(TAG, "reading brightness without write access")
+        }
+        val current = runCatching {
+            Settings.System.getInt(context.contentResolver, Settings.System.SCREEN_BRIGHTNESS)
+        }.getOrNull() ?: return Reply.error("I can't read the screen brightness.")
+        val percent = percentOf(current, BRIGHTNESS_MAX)
+        return Reply("Brightness is $percent percent.", Chip(ChipIcon.SETTINGS, "$percent%"))
+    }
+
     private fun brightness(change: LevelChange): Reply {
         if (!Settings.System.canWrite(context)) {
             return needsSetting(
@@ -717,6 +732,7 @@ class Skills(
         val target = when (change) {
             LevelChange.Up -> current + BRIGHTNESS_STEP
             LevelChange.Down -> current - BRIGHTNESS_STEP
+            is LevelChange.By -> current + BRIGHTNESS_MAX * change.delta / 100
             LevelChange.Max -> BRIGHTNESS_MAX
             // Never all the way off: a black screen looks exactly like a broken phone,
             // and the way back is a setting the user now cannot see to change.
@@ -739,35 +755,88 @@ class Skills(
         return Reply("Brightness $percent percent.", Chip(ChipIcon.SETTINGS, "$percent%"))
     }
 
+    /**
+     * Read the media volume back without changing it.
+     *
+     * "The device brightness" and "what's the volume" used to have nowhere to go, so
+     * they were answered by acting — the classifier picked the nearest label that
+     * involved a percentage and Sentry raised an already-maxed stream.
+     */
+    private fun volumeQuery(): Reply {
+        val audio = context.getSystemService(AudioManager::class.java)
+            ?: return Reply.error("I can't reach the audio service.")
+        val percent = percentOf(
+            audio.getStreamVolume(AudioManager.STREAM_MUSIC),
+            audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC),
+        )
+        return Reply("Media volume is $percent percent.", Chip(ChipIcon.VOLUME, "$percent%"))
+    }
+
     private fun volume(change: VolumeChange): Reply {
         val audio = context.getSystemService(AudioManager::class.java)
             ?: return Reply.error("I can't reach the audio service.")
 
         val stream = AudioManager.STREAM_MUSIC
         val max = audio.getStreamMaxVolume(stream)
+        if (max <= 0) return Reply.error("This phone reports no media volume range.")
+        val before = audio.getStreamVolume(stream)
 
-        when (change) {
-            VolumeChange.Up ->
-                audio.adjustStreamVolume(stream, AudioManager.ADJUST_RAISE, 0)
+        // Everything is computed as a target index rather than nudged, so that "down"
+        // and "down by ten percent" travel through the same arithmetic and cannot
+        // disagree about what a step is.
+        val target = when (change) {
+            VolumeChange.Up -> before + stepFor(max)
+            VolumeChange.Down -> before - stepFor(max)
+            VolumeChange.Mute -> 0
+            VolumeChange.Max -> max
+            is VolumeChange.Percent -> Math.round(max * change.value / 100f)
+            is VolumeChange.By -> before + Math.round(max * change.delta / 100f)
+        }.coerceIn(0, max)
 
-            VolumeChange.Down ->
-                audio.adjustStreamVolume(stream, AudioManager.ADJUST_LOWER, 0)
-
-            VolumeChange.Mute -> audio.setStreamVolume(stream, 0, 0)
-            VolumeChange.Max -> audio.setStreamVolume(stream, max, 0)
-            is VolumeChange.Percent ->
-                audio.setStreamVolume(stream, (max * change.value / 100f).toInt(), 0)
-        }
+        audio.setStreamVolume(stream, target, 0)
 
         val now = audio.getStreamVolume(stream)
-        val percent = if (max == 0) 0 else (now * 100f / max).toInt()
-        return Reply(
-            when (change) {
-                VolumeChange.Mute -> "Muted."
-                else -> "Volume $percent percent."
-            },
-            Chip(ChipIcon.VOLUME, "$percent%"),
-        )
+        val percent = percentOf(now, max)
+        val speech = when {
+            change == VolumeChange.Mute -> "Muted."
+            // Saying a number that did not move reads as the command being ignored.
+            now == before && now >= max -> "Volume is already all the way up."
+            now == before && now <= 0 -> "Volume is already off."
+            else -> "Volume $percent percent."
+        }
+        return Reply(speech, Chip(ChipIcon.VOLUME, "$percent%"))
+    }
+
+    /**
+     * The ringer, which is neither media volume nor Do Not Disturb.
+     *
+     * Silencing needs the same policy access as Do Not Disturb on modern Android, so
+     * a missing grant is handled the same way rather than failing silently — which is
+     * what "Ok, I'll keep the device in silent" was.
+     */
+    private fun silent(on: Boolean): Reply {
+        val audio = context.getSystemService(AudioManager::class.java)
+            ?: return Reply.error("I can't reach the audio service.")
+        val notifications = context.getSystemService(NotificationManager::class.java)
+
+        if (on && notifications?.isNotificationPolicyAccessGranted == false) {
+            return needsSetting(
+                "I need Do Not Disturb access to silence the ringer.",
+                Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS,
+            )
+        }
+
+        return runCatching {
+            audio.ringerMode =
+                if (on) AudioManager.RINGER_MODE_SILENT else AudioManager.RINGER_MODE_NORMAL
+            Reply(
+                if (on) "The phone is on silent." else "The ringer is back on.",
+                Chip(ChipIcon.VOLUME, if (on) "Silent" else "Ringer"),
+            )
+        }.getOrElse {
+            Log.w(TAG, "could not set ringer mode", it)
+            Reply.error("Android wouldn't let me change the ringer.")
+        }
     }
 
     private fun dnd(on: Boolean): Reply {
@@ -976,6 +1045,19 @@ class Skills(
      * Returns null in normal use, so every caller is one line and the guard cannot be
      * left off a new skill by forgetting to wrap it in an if.
      */
+    private fun percentOf(value: Int, max: Int): Int =
+        if (max <= 0) 0 else Math.round(value * 100f / max).coerceIn(0, 100)
+
+    /**
+     * How far one spoken "turn it down" should move a stream.
+     *
+     * A single hardware step is whatever the manufacturer chose: on this phone media
+     * volume has 25 of them, so "lower the volume" moved 100% to 96% and sounded
+     * broken. A tenth of the range is what people seem to mean, and never less than
+     * one step, so a coarse stream still moves.
+     */
+    private fun stepFor(max: Int): Int = maxOf(1, Math.round(max / 10f))
+
     private fun quietly(what: String): Reply? =
         if (disturbances.blocked) {
             Log.i(TAG, "would $what")

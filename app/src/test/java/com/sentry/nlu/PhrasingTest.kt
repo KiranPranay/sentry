@@ -69,9 +69,20 @@ class PhrasingTest {
 
     @Test
     fun `muting`() {
-        listOf("mute", "mute it", "mute the phone", "silence the phone", "volume off",
-            "turn off the sound", "no sound")
+        listOf("mute", "mute it", "mute the phone", "volume off",
+            "turn off the sound", "turn the volume off", "no sound")
             .forEach { assertEquals(it, Command.Volume(VolumeChange.Mute), match(it)) }
+    }
+
+    @Test
+    fun `silencing the phone is the ringer, not the media volume`() {
+        // These were the same command until "keep the device in silent" reached the
+        // conversation tier, which said "Ok, I'll keep the device in silent" and did
+        // nothing — muting the media stream would not have helped either. Silencing a
+        // phone is about whether it rings, which is a different system.
+        listOf("silence the phone", "keep the device in silent", "put the phone on silent")
+            .forEach { assertEquals(it, Command.Silent(on = true), match(it)) }
+        assertEquals(Command.Silent(on = false), match("turn off silent"))
     }
 
     @Test

@@ -51,6 +51,26 @@ sealed interface Command {
     data class Torch(val on: Boolean) : Command
     data class Volume(val change: VolumeChange) : Command
     data class Brightness(val change: LevelChange) : Command
+
+    /**
+     * Read a level back instead of setting it.
+     *
+     * "The device brightness" is a question, and the only reason it was ever answered
+     * by turning the volume up is that there was nothing here for it to become. The
+     * classifier had to choose between fifteen labels, none of which meant "tell me
+     * the brightness", so it picked one that at least involved a percentage.
+     */
+    data object VolumeQuery : Command
+    data object BrightnessQuery : Command
+
+    /**
+     * The ringer, which is neither the media volume nor Do Not Disturb.
+     *
+     * "Keep the device in silent" reached the conversation tier, which said "Ok, I'll
+     * keep the device in silent" and did nothing at all — the worst failure in the
+     * system, because it is indistinguishable from success until the phone rings.
+     */
+    data class Silent(val on: Boolean) : Command
     data class Dnd(val on: Boolean) : Command
     data object OpenCamera : Command
     data object BatteryStatus : Command
@@ -133,6 +153,15 @@ sealed interface LevelChange {
     data object Max : LevelChange
     data object Min : LevelChange
     data class Percent(val value: Int) : LevelChange
+
+    /**
+     * Move [delta] percentage points from wherever it is now, signed.
+     *
+     * "Lower the volume by fifty percent" is not "lower the volume", and without this
+     * the two were the same command: a single hardware step, which on a 25-step
+     * stream is four percent. Asked for half, the phone gave a twenty-fifth.
+     */
+    data class By(val delta: Int) : LevelChange
 }
 
 sealed interface VolumeChange {
@@ -141,6 +170,9 @@ sealed interface VolumeChange {
     data object Mute : VolumeChange
     data object Max : VolumeChange
     data class Percent(val value: Int) : VolumeChange
+
+    /** Signed move from the current level, in percentage points. See [LevelChange.By]. */
+    data class By(val delta: Int) : VolumeChange
 }
 
 enum class Panel { WIFI, BLUETOOTH, INTERNET, NFC, SETTINGS }
@@ -180,7 +212,10 @@ enum class Commit {
 val Command.commit: Commit
     get() = when (this) {
         is Command.TimeQuery, is Command.DateQuery, is Command.BatteryStatus,
-        is Command.Calculate, is Command.Chat -> Commit.PURE
+        is Command.Calculate, is Command.Chat,
+        // Reading a level back changes nothing, which is exactly why the fast path
+        // is allowed to accept a shape it would otherwise have to refuse.
+        is Command.VolumeQuery, is Command.BrightnessQuery -> Commit.PURE
 
         // Writes a file and flashes the screen, but replaces nothing and harms
         // nothing if it happens twice.
@@ -191,13 +226,17 @@ val Command.commit: Commit
             Commit.IDEMPOTENT
 
         is Command.Brightness -> when (change) {
-            is LevelChange.Up, is LevelChange.Down -> Commit.RELATIVE
+            is LevelChange.Up, is LevelChange.Down, is LevelChange.By -> Commit.RELATIVE
             is LevelChange.Max, is LevelChange.Min, is LevelChange.Percent ->
                 Commit.IDEMPOTENT
         }
 
+        // Silencing the ringer is a state, not a nudge, and saying it twice leaves
+        // the phone exactly as silent as saying it once.
+        is Command.Silent -> Commit.IDEMPOTENT
+
         is Command.Volume -> when (change) {
-            is VolumeChange.Up, is VolumeChange.Down -> Commit.RELATIVE
+            is VolumeChange.Up, is VolumeChange.Down, is VolumeChange.By -> Commit.RELATIVE
             is VolumeChange.Mute, is VolumeChange.Max, is VolumeChange.Percent ->
                 Commit.IDEMPOTENT
         }

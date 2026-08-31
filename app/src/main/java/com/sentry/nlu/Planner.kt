@@ -8,7 +8,6 @@ import com.sentry.brain.Role
 import com.sentry.brain.Shape
 import com.sentry.core.Command
 import com.sentry.core.MediaAction
-import com.sentry.core.VolumeChange
 import org.json.JSONObject
 
 /**
@@ -31,8 +30,31 @@ class Planner(private val brains: Brains) {
 
         val LABELS = listOf(
             "conversation", "alarm", "timer", "call", "message", "music",
-            "app", "search", "directions", "flashlight", "volume", "camera",
-            "battery", "time", "date",
+            "app", "search", "directions", "flashlight", "volume", "brightness",
+            "silent", "camera", "battery", "time", "date",
+        )
+
+        /**
+         * Words that must appear before a device label may be believed.
+         *
+         * This list is enforced as a hard decode constraint, so the model can only
+         * answer with a label that is on it — and "brightness" was not. Asked to
+         * classify "lower the brightness by fifty percent" it had to pick something,
+         * and picked "battery", the only other label about a percentage; Sentry
+         * replied "Battery is at 77 percent." That is not the model being stupid, it
+         * is being given no way to be right.
+         *
+         * Adding the label fixes that case. This table fixes the general one: a
+         * classifier forced to choose will always choose something, so a label whose
+         * own subject is nowhere in the sentence is a guess and gets refused.
+         */
+        val SUBJECTS = mapOf(
+            "battery" to listOf("batter", "charg", "power", "juice"),
+            "volume" to listOf("volume", "sound", "audio", "loud", "quiet", "mute", "speaker"),
+            "brightness" to listOf("bright", "dim", "screen", "display", "dark"),
+            "silent" to listOf("silent", "silence", "ringer", "ring", "vibrat", "disturb"),
+            "flashlight" to listOf("flash", "torch", "light"),
+            "camera" to listOf("camera", "photo", "picture", "selfie"),
         )
 
         /**
@@ -92,8 +114,9 @@ class Planner(private val brains: Brains) {
             return Command.Chat(text)
         }
 
-        val label = classify(text, history)
-        Log.d(TAG, "\"$text\" -> $label")
+        val raw = classify(text, history)
+        val label = ground(raw, text)
+        Log.d(TAG, "\"$text\" -> $label" + if (label != raw) " (was \"$raw\", ungrounded)" else "")
 
         return when (label) {
             "alarm" -> extractAlarm(text) ?: Command.Chat(text)
@@ -116,13 +139,33 @@ class Planner(private val brains: Brains) {
                 ?.let { Command.Navigate(it) } ?: Command.Chat(text)
 
             "flashlight" -> Command.Torch(!looksNegative(text))
-            "volume" -> volumeFrom(text)
+
+            // Both go back through the same parser FastMatcher already tried. If it
+            // could not read a level out of the sentence then neither can this, and
+            // the honest answer is to talk rather than to move something at random —
+            // the old fall-through raised the volume for anything it could not read,
+            // which is how a brightness request became "Volume 100 percent."
+            "volume", "brightness" -> Levels.match(text) ?: Command.Chat(text)
+            "silent" -> Command.Silent(on = !looksNegative(text))
             "camera" -> Command.OpenCamera
             "battery" -> Command.BatteryStatus
             "time" -> Command.TimeQuery
             "date" -> Command.DateQuery
             else -> Command.Chat(text)
         }
+    }
+
+    /**
+     * Refuse a device label whose subject is not in the sentence.
+     *
+     * Cheap, and it only ever downgrades to conversation, so the worst case is that
+     * Sentry talks instead of acting — which is the failure mode this whole tier is
+     * supposed to prefer.
+     */
+    private fun ground(label: String, text: String): String {
+        val subjects = SUBJECTS[label] ?: return label
+        val lower = text.lowercase()
+        return if (subjects.any { lower.contains(it) }) label else "conversation"
     }
 
     private fun wordCount(text: String): Int =
@@ -229,25 +272,6 @@ class Planner(private val brains: Brains) {
     private fun looksNegative(text: String): Boolean =
         Regex("""\b(off|stop|disable|kill|turn it off)\b""").containsMatchIn(text.lowercase())
 
-    private fun volumeFrom(text: String): Command {
-        val s = text.lowercase()
-        Regex("""(\d{1,3})\s*(?:%|percent)""").find(s)?.let { m ->
-            m.groupValues[1].toIntOrNull()?.takeIf { it in 0..100 }
-                ?.let { return Command.Volume(VolumeChange.Percent(it)) }
-        }
-        return when {
-            Regex("""\b(mute|silence|silent)\b""").containsMatchIn(s) ->
-                Command.Volume(VolumeChange.Mute)
-
-            Regex("""\b(max|maximum|full|loudest)\b""").containsMatchIn(s) ->
-                Command.Volume(VolumeChange.Max)
-
-            Regex("""\b(down|lower|quieter|softer|decrease|reduce)\b""").containsMatchIn(s) ->
-                Command.Volume(VolumeChange.Down)
-
-            else -> Command.Volume(VolumeChange.Up)
-        }
-    }
 }
 
 /** Chat replies are spoken aloud, which is the whole reason this prompt is so blunt. */
